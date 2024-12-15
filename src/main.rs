@@ -2,10 +2,16 @@
 #![allow(dead_code)]
 use glam::DVec3;
 use std::rc::Rc;
-use std::f64::INFINITY;
+use std::f64::{INFINITY,NEG_INFINITY};
 use rand::prelude::*;
 use rand::distributions::Uniform;
 use std::cell::RefCell;
+use std::sync::Arc;
+use rayon::prelude::*;
+
+struct UnsafeSync<T>(T);
+unsafe impl<T> Sync for UnsafeSync<T> {}
+unsafe impl<T> Send for UnsafeSync<T> {}
 
 type Color = DVec3;
 type Point = DVec3;
@@ -21,10 +27,10 @@ pub struct ConfigValue {
 #[link_section = ".data"]
 #[no_mangle]
 static mut CONFIGS: [ConfigValue; 5] = [
-    ConfigValue { marker: *b"COEF_F1_", value: 1200.0 }, // width
+    ConfigValue { marker: *b"COEF_F1_", value: 1080.0 }, // width
     ConfigValue { marker: *b"COEF_F2_", value: 16.0/9.0 }, // aspect ratio
-    ConfigValue { marker: *b"COEF_F3_", value: 500.0 }, // pixel density
-    ConfigValue { marker: *b"COEF_F4_", value: 50.0 }, // max bounce
+    ConfigValue { marker: *b"COEF_F3_", value: 1024.0 }, // pixel density
+    ConfigValue { marker: *b"COEF_F4_", value: 100.0 }, // max bounce
     ConfigValue { marker: *b"COEF_F5_", value: 0.2 }, // gamut
 ];
 
@@ -42,6 +48,13 @@ thread_local! {
     ));
 }
 
+thread_local! {
+    static AXIS_RNG: RefCell<(ThreadRng, Uniform<usize>)> = RefCell::new((
+        thread_rng(),
+        Uniform::new_inclusive(0, 2)
+    ));
+}
+
 fn linear_to_gamma(linear: Float) -> Float{
     if linear>0.0 {linear.sqrt()} else {0.0}
 }
@@ -50,6 +63,13 @@ fn rand() -> Float{
     SQUARE_RNG.with(|rng| {
         let (rng, distribution) = &mut *rng.borrow_mut();
         distribution.sample(rng).abs()
+    })
+}
+
+fn random_axis() -> usize{
+    AXIS_RNG.with(|rng| {
+        let (rng, distribution) = &mut *rng.borrow_mut();
+        distribution.sample(rng)
     })
 }
 
@@ -148,6 +168,7 @@ impl Utils for Vector {
 struct Ray{
     orig:Point,
     dir:Point,
+    t:Float
 }
 
 impl Ray{
@@ -173,18 +194,19 @@ impl HitRecord{
 }
 
 trait Hittable{
-    fn hit(&self, ray: &Ray, t:Interval, record:&mut HitRecord) -> bool;
+    fn hit(&self, ray: &Ray, t:&Interval, record:&mut HitRecord) -> bool;
+    fn bounding_box(&self) -> &AABB;
 }
-
 
 struct Sphere{
     center: Point,
     radius: Float,
-    mat: Rc<dyn Material>
+    mat: Rc<dyn Material>,
+    bbox: AABB,
 }
 
 impl Hittable for Sphere{
-    fn hit(&self, ray: &Ray, t:Interval, record:&mut HitRecord) -> bool{
+    fn hit(&self, ray: &Ray, t:&Interval, record:&mut HitRecord) -> bool{
         let oc = self.center - ray.orig;
         let a = ray.dir.length_squared();
         let h = ray.dir.dot(oc);
@@ -211,21 +233,29 @@ impl Hittable for Sphere{
         }
 
     }
+    fn bounding_box(&self) -> &AABB {
+        &self.bbox
+    }
+
 }
 
-#[derive(Default)]
 struct HittableList{
-    objects: Vec<Rc<dyn Hittable>>
+    objects: Vec<Rc<dyn Hittable>>,
+    bbox: AABB,
 }
 
 impl HittableList{
+    fn new() -> Self{
+        HittableList{objects:Vec::new(), bbox:AABB::EMPTY}
+    }
     fn add(&mut self, object: Rc<dyn Hittable>) {
+        self.bbox = AABB::enclosing_volume(&self.bbox, object.bounding_box());
         self.objects.push(object);
     }
 }
 
 impl Hittable for HittableList{
-    fn hit(&self, ray: &Ray, t:Interval, record:&mut HitRecord) -> bool{
+    fn hit(&self, ray: &Ray, t:&Interval, record:&mut HitRecord) -> bool{
         let mut record_tmp = Default::default();
         let mut did_hit = false;
         let mut t_least = t.max;
@@ -253,7 +283,7 @@ impl Hittable for HittableList{
         */
         for object in &self.objects{
             // only closer objects permitted after each iter
-            if object.hit(ray, Interval{min:t.min, max:t_least}, &mut record_tmp) {
+            if object.hit(ray, &mut Interval{min:t.min, max:t_least}, &mut record_tmp) {
                 did_hit = true;
                 t_least = record_tmp.t;
                 std::mem::swap(record, &mut record_tmp);
@@ -261,28 +291,177 @@ impl Hittable for HittableList{
         }
         did_hit
     }
+    fn bounding_box(&self) -> &AABB {
+        &self.bbox
+    }
+
 }
 
+impl Sphere{
+    fn new(center: Point, radius: Float, mat: Rc<dyn Material>) -> Self{
+        let r = Vector::ONE*radius;
+        let bbox = AABB::enclosing_point(&(center - r), &(center + r));
+        Sphere{center, radius, mat, bbox}
+    }
+}
+
+#[derive(Clone, Copy)]
 struct Interval{
     min:Float,
     max:Float,
 }
 
 impl Interval{
-    fn size(&self) -> Float{
+    const EMPTY: Self = Self{min:INFINITY, max:NEG_INFINITY};
+    fn len(&self) -> Float{
         self.max - self.min
     }
     fn contains(&self, x:Float) -> bool{
         self.min <= x && x <= self.max
     }
-
     fn surrounds(&self, x:Float) -> bool{
         self.min < x && x < self.max
     }
     fn clamp(&self, x:Float) -> Float{
         x.clamp(self.min, self.max)
     }
+    fn expanded(&self, d:Float) -> Interval{
+        Interval{min:self.min-d, max:self.max+d}
+    }
+    fn ordered(x:Float, y:Float) -> Self{
+        let (min, max) = if x>=y {(y, x)} else {(x, y)};
+        Self{min, max}
+    }
+    fn enclosing(a: &Self, b:&Self) -> Self{
+        let min = a.min.min(b.min);
+        let max = a.max.max(b.max);
+        Interval{min, max}
+    }
 }
+
+#[derive(Clone, Copy)]
+struct AABB{
+    x: Interval,
+    y: Interval,
+    z: Interval
+}
+
+impl std::ops::Index<usize> for AABB {
+    type Output = Interval;
+    fn index(&self, index: usize) -> &Self::Output {
+        match index {
+            0 => &self.x,
+            1 => &self.y,
+            2 => &self.z,
+            _ => panic!("Index out of bounds: {}", index),
+        }
+    }
+}
+
+impl AABB{
+    const EMPTY: Self = Self{
+        x:Interval::EMPTY,
+        y:Interval::EMPTY,
+        z:Interval::EMPTY,
+    };
+    fn enclosing_point(a: &Vector, b: &Vector) -> Self{
+        let x = Interval::ordered(a.x, b.x);
+        let y = Interval::ordered(a.y, b.y);
+        let z = Interval::ordered(a.z, b.z);
+        Self{x, y, z}
+    }
+    fn enclosing_volume(a: &Self, b: &Self) -> Self{
+        let x = Interval::enclosing(&a.x, &b.x);
+        let y = Interval::enclosing(&a.y, &b.y);
+        let z = Interval::enclosing(&a.z, &b.z);
+        Self{x, y, z}
+    }
+    fn hit(&self, ray: &Ray, ray_t: &Interval) -> bool{
+        for axis in 0..3{
+            let interval = &self[axis];
+            let dinv = ray.dir[axis].recip();
+            let from = ray.orig[axis];
+
+            let t0 = (interval.min - from) * dinv;
+            let t1 = (interval.max - from) * dinv;
+
+            let (t0, t1) = if t0<=t1 {(t0, t1)} else {(t1, t0)};
+            let t_min = ray_t.min.max(t0);
+            let t_max = ray_t.max.min(t1);
+            if t_max <= t_min {return false;}
+        }
+        true
+    }
+    fn longest_axis(&self) -> usize {
+        if self.x.len() > self.y.len() && self.x.len() > self.z.len() {
+            0
+        } else if self.y.len() > self.z.len() {
+            1
+        } else {
+            2
+        }
+    }
+}
+
+struct BVHNode{
+    left: Rc<dyn Hittable>,
+    right: Rc<dyn Hittable>,
+    bbox: AABB
+}
+
+impl Hittable for BVHNode{
+    fn hit(&self, ray: &Ray, t:&Interval, record:&mut HitRecord) -> bool {
+        if !self.bbox.hit(ray, t){
+            false
+        } else {
+            let hit_left = self.left.hit(ray, t, record);
+            let hit_right = self.right.hit(ray, &mut Interval{min:t.min, max: if hit_left {record.t} else {t.max}}, record); // records are modified only if hit before left, otherwise only record_tmp is used
+            hit_left || hit_right
+        }
+    }
+    fn bounding_box(&self) -> &AABB {
+        &self.bbox
+    }
+
+}
+
+impl BVHNode{
+    fn from_hittable_list(list: &mut HittableList) -> Self{
+        let size = list.objects.len();
+        Self::from_vec(&mut list.objects, 0, size)
+    }
+    fn from_vec(objects: &mut Vec<Rc<dyn Hittable>>, start: usize, end:usize) -> Self{
+        let mut bbox = AABB::EMPTY;
+        for i in start..end{
+            bbox = AABB::enclosing_volume(&bbox, objects[i].bounding_box());
+        }
+        let axis = bbox.longest_axis();
+        let compatator = |a: &Rc<dyn Hittable>, b: &Rc<dyn Hittable>| {
+            a.bounding_box()[axis].min.partial_cmp(&b.bounding_box()[axis].min).unwrap()
+        };
+
+        let span = end - start;
+
+        let (left, right) = match span {
+            1 => {
+                (objects[start].clone(), objects[start].clone())
+            },
+            2 => {
+                (objects[start].clone(), objects[start+1].clone())
+            },
+            _ => {
+                objects[start..end].sort_by(compatator);
+                let mid = start + span/2;
+                let left = Rc::new(BVHNode::from_vec(objects, start, mid));
+                let right = Rc::new(BVHNode::from_vec(objects, mid, end));
+                (left as Rc<dyn Hittable>, right as Rc<dyn Hittable>)
+            }
+        };
+        let bbox = AABB::enclosing_volume(left.bounding_box(), right.bounding_box());
+        Self{left, right, bbox}
+    }
+}
+
 
 struct Camera{
     aspect_ratio: Float,
@@ -306,21 +485,36 @@ struct Camera{
 impl Camera{
     fn render(&self, world:&dyn Hittable) {
         println!("P3\n{} {}\n255\n", self.image_width, self.image_height);
-        for j in 0..self.image_height{
-            for i in 0..self.image_width{
-            let pixel_color:Color = (0..self.pixel_density)
+        //for j in 0..self.image_height{
+        //    for i in 0..self.image_width{
+        //        let pixel_color:Color = (0..self.pixel_density)
+        //            .map(|_| Camera::color(&self.get_ray(i, j), world, self.max_depth))
+        //            .sum::<Color>()*self.inverse_density;
+        //        pixel_color.write();
+        //    }
+        //}
+        let mut data = vec![Color::ZERO; self.image_height*self.image_width];
+        let unsafe_world = Arc::new(UnsafeSync(world));
+        data.par_iter_mut().enumerate().for_each(|(x, c)| {
+            let world = unsafe_world.0;
+            let j = x / self.image_width;
+            let i = x % self.image_width;
+            *c = (0..self.pixel_density)
                 .map(|_| Camera::color(&self.get_ray(i, j), world, self.max_depth))
                 .sum::<Color>()*self.inverse_density;
-                pixel_color.write();
-            }
+
+        });
+        for c in data{
+            c.write();
         }
+
     }
     fn color(ray: &Ray, world:&dyn Hittable, depth: usize) -> Color{
         if depth==0{
             return Color::ZERO;
         }
         let mut record: HitRecord = Default::default();
-        if  world.hit(ray, Interval{min:0.001, max:INFINITY}, &mut record) {
+        if  world.hit(ray, &mut Interval{min:0.001, max:INFINITY}, &mut record) {
             let mut attenuation = Color::ZERO;
             let mut scattered = Default::default();
             // Option<T>::as_ref() -> Option<&T>
@@ -341,7 +535,7 @@ impl Camera{
         let pixel_sample = self.pixel_corner + ((i as Float + offset.x) * self.pixel_delta_u) + ((j as Float + offset.y) * self.pixel_delta_v);
         let ray_origin = self.defocus_disk_sample();
         let ray_direction = pixel_sample - ray_origin;
-        Ray{orig:ray_origin, dir:ray_direction}
+        Ray{orig:ray_origin, dir:ray_direction, t:0.0}
     }
     fn defocus_disk_sample(&self) -> Point{
         let p = Point::random_on_disk();
@@ -426,7 +620,7 @@ impl Material for Lambertian{
             let dir = record.n + Vector::random_unit_vector();
             if dir.near_zero() { record.n } else { dir }
         };
-        *scattered = Ray{orig:record.p, dir:scatter_direction};
+        *scattered = Ray{orig:record.p, dir:scatter_direction, t:0.0};
         *attenuation = self.albedo;
         return true;
     }
@@ -438,7 +632,7 @@ impl Material for Metal{
             let dir:Vector = ray.dir.reflect(record.n);
             dir.normalize() + (self.fuzz * Vector::random_unit_vector())
         };
-        *scattered = Ray{orig:record.p, dir:reflected};
+        *scattered = Ray{orig:record.p, dir:reflected, t:0.0};
         *attenuation = self.albedo;
         return true;
     }
@@ -456,7 +650,7 @@ impl Material for Dielectric{
         } else{
             unit.refract(record.n, ri)
         };
-        *scattered = Ray{orig:record.p, dir};
+        *scattered = Ray{orig:record.p, dir, t: 0.0 };
         *attenuation = Color::ONE;
         return true;
     }
@@ -472,12 +666,23 @@ impl Dielectric{
     }
 }
 
+
+
 fn main() {
-    let mut world:HittableList  = Default::default();
+    let mut world:HittableList  = HittableList::new();
     let camera: Camera = Camera::new();
 
     let material_ground = Rc::new(Lambertian{albedo: Color{x:0.5, y:0.5, z:0.5}});
-    world.add(Rc::new(Sphere{center:Point{x:0.0, y:-1000., z:-1.0}, radius:1000., mat:material_ground}));
+    world.add(Rc::new(Sphere::new(Point{x:0.0, y:-1000., z:-1.0}, 1000., material_ground)));
+
+    let material1 = Rc::new(Dielectric{refractive_index:1.5});
+    world.add(Rc::new(Sphere::new(Point{x:0.0, y:1.0, z:0.0}, 1.0, material1)));
+
+    let material2 = Rc::new(Lambertian{albedo: Color{x:0.4, y:0.2, z:0.1}});
+    world.add(Rc::new(Sphere::new(Point{x:-4.0, y:1.0, z:0.0}, 1.0, material2)));
+
+    let material3 = Rc::new(Lambertian{albedo: Color{x:0.7, y:0.6, z:0.0}});
+    world.add(Rc::new(Sphere::new(Point{x:4.0, y:1.0, z:0.0}, 1.0, material3)));
 
     for a in -11..11{
         for b in -11..11{
@@ -497,11 +702,14 @@ fn main() {
                     Rc::new(Dielectric{refractive_index: 1.5}) as Rc<dyn Material>
                 }
             };
-            world.add(Rc::new(Sphere{center, radius:0.2, mat}));
-
-
+            world.add(Rc::new(Sphere::new(center, 0.2, mat)));
         }
     }
+    let bvh = Rc::new(BVHNode::from_hittable_list(&mut world));
+    let world = HittableList {
+        objects: vec![bvh.clone()],
+        bbox: *bvh.bounding_box()
+    };
 
     camera.render(&world);
 }
