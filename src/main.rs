@@ -8,7 +8,7 @@ use rand::prelude::*;
 use rand::distributions::Uniform;
 use std::cell::RefCell;
 use std::sync::Arc;
-use std::ops::Index;
+use std::ops::{Index, Add};
 use std::array::from_fn;
 use rayon::prelude::*;
 
@@ -32,7 +32,7 @@ pub struct ConfigValue {
 #[no_mangle]
 static mut CONFIGS: [ConfigValue; 5] = [
     ConfigValue { marker: *b"COEF_F1_", value: 400.0 }, // width
-    ConfigValue { marker: *b"COEF_F2_", value: 16.0/9.0 }, // aspect ratio
+    ConfigValue { marker: *b"COEF_F2_", value: 1. }, // aspect ratio
     ConfigValue { marker: *b"COEF_F3_", value: 100.0 }, // pixel density
     ConfigValue { marker: *b"COEF_F4_", value: 50.0 }, // max bounce
     ConfigValue { marker: *b"COEF_F5_", value: 4.0 }, // 
@@ -219,6 +219,75 @@ impl Hittable for Sphere{
 
 }
 
+struct Translate{
+    offset: Vector,
+    object: Rc<dyn Hittable>,
+    bbox: AABB
+}
+
+impl Translate{
+    fn new(object: Rc<dyn Hittable>, offset: Vector) -> Self{
+        let bbox = object.bounding_box() + &offset;
+        Self{object, offset, bbox}
+    }
+}
+
+impl Hittable for Translate{
+    fn bounding_box(&self) -> &AABB {
+        &self.bbox
+    }
+    fn hit(&self, ray: &Ray, t:&Interval) -> Option<HitRecord> {
+        let offset_ray = Ray{orig:ray.orig-self.offset, dir:ray.dir};
+        self.object.hit(&offset_ray, t).map(|r| HitRecord{p:r.p+self.offset, ..r})
+    }
+}
+
+impl Hittable for RotateY{
+    fn bounding_box(&self) -> &AABB {
+        &self.bbox
+    }
+    fn hit(&self, ray: &Ray, t:&Interval) -> Option<HitRecord> {
+        let orig = Point::new(self.cos*ray.orig.x - self.sin*ray.orig.z, ray.orig.y, self.sin*ray.orig.x + self.cos*ray.orig.z);
+        let dir = Point::new(self.cos*ray.dir.x - self.sin*ray.dir.z, ray.dir.y, self.sin*ray.dir.x + self.cos*ray.dir.z);
+        let rotated_ray = Ray{orig, dir};
+        self.object.hit(&rotated_ray, t).map(|record| {
+            let p = Point::new(self.cos*record.p.x + self.sin*record.p.z, record.p.y, -self.sin*record.p.x + self.cos*record.p.z);
+            let n = Point::new(self.cos*record.n.x + self.sin*record.n.z, record.n.y, -self.sin*record.n.x + self.cos*record.n.z);
+            HitRecord{p, n, ..record}
+        })
+    }
+}
+impl RotateY{
+    fn new(object: Rc<dyn Hittable>, t: Float) -> Self{
+        let sin = t.sin();
+        let cos = t.cos();
+        let bbox = object.bounding_box();
+
+        let (min, max) = (UV::splat(INFINITY), UV::splat(NEG_INFINITY));
+
+        let corners = (0..2).flat_map(|i| (0..2).flat_map(move |j| (0..2).map(move |k| {
+            let x = if i==0 {bbox.x.min} else {bbox.x.max};
+            let y = if i==0 {bbox.y.min} else {bbox.y.max};
+            let z = if i==0 {bbox.z.min} else {bbox.z.max};
+            let xn = cos*x + sin*z;
+            let zn = -sin*x + cos*z;
+            UV::new(xn, zn)
+        })));
+        let (min, max) = corners.fold( (min, max), |(min, max), p| (min.min(p), max.max(p))  );
+        let (min, max) = (Vector{y:bbox.y.min, x:min.x, z:min.y}, Vector{y:bbox.y.max, x:max.x, z:max.y});
+        let bbox = AABB::enclosing_point(&min, &max);
+        Self{sin, cos, bbox, object}
+    }
+}
+
+struct RotateY{
+    sin: Float,
+    cos: Float,
+    bbox: AABB,
+    object: Rc<dyn Hittable>
+}
+
+
 struct Quad{
     q: Point,
     u: Point,
@@ -275,6 +344,65 @@ impl Hittable for Quad{
     }
 }
 
+struct ConstantMedium{
+    boundary: Rc<dyn Hittable>,
+    neg_inv_density: Float,
+    phase_function: Rc<dyn Material>
+}
+
+impl ConstantMedium{
+    fn from_color(boundary: Rc<dyn Hittable>, density: Float, albedo: Color) -> Self{
+        let neg_inv_density = -density.recip();
+        let phase_function = Rc::new(Isotropic::from_color(albedo));
+        Self{
+            boundary,
+            neg_inv_density,
+            phase_function,
+        }
+    }
+    fn from_texture(boundary: Rc<dyn Hittable>, density: Float, tex: Rc<dyn Texture>) -> Self{
+        let neg_inv_density = -density.recip();
+        let phase_function = Rc::new(Isotropic::from_texture(tex));
+        Self{
+            boundary,
+            neg_inv_density,
+            phase_function,
+        }
+    }
+}
+
+impl Hittable for ConstantMedium{
+    fn hit(&self, ray: &Ray, t:&Interval) -> Option<HitRecord> {
+        self.boundary.hit(ray, &Interval::ALL).and_then(|record_all| {
+            self.boundary.hit(ray, &Interval{min:record_all.t+0.0001, max:INFINITY}).and_then(|record_box|{
+                let t_prev = t.min.max(record_all.t);
+                let t_next = t.max.min(record_box.t);
+                if t_prev >= t_next {
+                    None
+                } else {
+                    let t_prev = t_prev.max(0.0);
+                    let ray_length = ray.dir.length();
+                    let distance_inside_boundary = (t_next-t_prev)*ray_length;
+                    let hit_distance = self.neg_inv_density * rand().ln();
+                    if hit_distance > distance_inside_boundary{
+                        None
+                    } else {
+                        let t = t_prev + hit_distance/ray_length;
+                        let p = ray.at(t);
+                        let n = Vector::X;
+                        let front = true;
+                        let mat = self.phase_function.clone();
+                        Some(HitRecord{p, n, mat, t, front, uv:UV::ZERO})
+                    }
+                }
+            })
+        })
+    }
+    fn bounding_box(&self) -> &AABB {
+        &self.boundary.bounding_box()
+    }
+}
+
 struct HittableList{
     objects: Vec<Rc<dyn Hittable>>,
     bbox: AABB,
@@ -282,7 +410,7 @@ struct HittableList{
 
 impl HittableList{
     fn new() -> Self{
-        HittableList{objects:Vec::new(), bbox:AABB::EMPTY}
+        HittableList{objects:Vec::new(), bbox:AABB::NONE}
     }
     fn add(&mut self, object: Rc<dyn Hittable>) {
         self.bbox = AABB::enclosing_volume(&self.bbox, object.bounding_box());
@@ -315,20 +443,15 @@ impl Hittable for HittableList{
         * B, here when finally going out of scope, double free can occur.
         */
 
+        // Only closer objects are permitted after each iteration
         self.objects.iter()
             .filter_map(|object| {
-                // Only closer objects are permitted after each iteration
-                match object.hit(ray, &mut Interval { min: t.min, max: t_least }) {
-                    Some(record_tmp) => {
+                object.hit(ray, &mut Interval { min: t.min, max: t_least }).map(
+                    |record_tmp| {
                         t_least = record_tmp.t;
-                        Some(record_tmp)
+                        record_tmp
                     }
-                    None => None,
-                }
-            })
-            .last()
-
-            // only closer objects permitted after each iter
+                )}).last()
     }
     fn bounding_box(&self) -> &AABB {
         &self.bbox
@@ -357,8 +480,18 @@ struct Interval{
     max:Float,
 }
 
+impl Add<Float> for &Interval{
+    type Output = Interval;
+    fn add(self, rhs: Float) -> Self::Output {
+        let min = self.min + rhs;
+        let max = self.max + rhs;
+        Self::Output{min, max}
+    }
+}
+
 impl Interval{
-    const EMPTY: Self = Self{min:INFINITY, max:NEG_INFINITY};
+    const NONE: Self = Self{min:INFINITY, max:NEG_INFINITY};
+    const ALL: Self = Self{min:NEG_INFINITY, max:INFINITY};
     fn len(&self) -> Float{
         self.max - self.min
     }
@@ -404,11 +537,21 @@ impl Index<usize> for AABB {
     }
 }
 
+impl Add<&Vector> for &AABB{
+    type Output = AABB;
+    fn add(self, offset: &Vector) -> Self::Output{
+        let x = &self.x + offset.x;
+        let y = &self.y + offset.y;
+        let z = &self.z + offset.z;
+        Self::Output{x, y, z}
+    }
+} 
+
 impl AABB{
-    const EMPTY: Self = Self{
-        x:Interval::EMPTY,
-        y:Interval::EMPTY,
-        z:Interval::EMPTY,
+    const NONE: Self = Self{
+        x:Interval::NONE,
+        y:Interval::NONE,
+        z:Interval::NONE,
     };
     fn enclosing_point(a: &Vector, b: &Vector) -> Self{
         let x = Interval::ordered(a.x, b.x);
@@ -490,7 +633,7 @@ impl BVHNode{
         Self::from_vec(&mut list.objects, 0, size)
     }
     fn from_vec(objects: &mut Vec<Rc<dyn Hittable>>, start: usize, end:usize) -> Self{
-        let mut bbox = AABB::EMPTY;
+        let mut bbox = AABB::NONE;
         for i in start..end{
             bbox = AABB::enclosing_volume(&bbox, objects[i].bounding_box());
         }
@@ -523,6 +666,7 @@ impl BVHNode{
 
 
 struct Camera{
+    background: Color,
     aspect_ratio: Float,
     image_width: usize,
     image_height: usize,
@@ -552,7 +696,7 @@ impl Camera{
             let j = x / self.image_width;
             let i = x % self.image_width;
             *c = (0..self.pixel_density)
-                .map(|_| Camera::color(&self.get_ray(i, j), world, self.max_depth))
+                .map(|_| self.color(&self.get_ray(i, j), world, self.max_depth))
                 .sum::<Color>()*self.inverse_density;
 
         });
@@ -560,7 +704,7 @@ impl Camera{
             c.write();
         }
     }
-    fn color(ray: &Ray, world:&dyn Hittable, depth: usize) -> Color{
+    fn color(&self, ray: &Ray, world:&dyn Hittable, depth: usize) -> Color{
         if depth==0{
             return Color::ZERO;
         }
@@ -569,15 +713,11 @@ impl Camera{
                 // Option<T>::as_ref() -> Option<&T>
                 match  record.mat.as_ref().scatter(ray, &record){
                     Some((attenuation, scattered)) =>
-                    attenuation * Camera::color(&scattered, world, depth-1),
-                    None => Color::ZERO
+                    attenuation * self.color(&scattered, world, depth-1),
+                    None => record.mat.as_ref().emitted(record.uv, &record.p)
                 }
             },
-            None => {
-                let unit = ray.dir.normalize();
-                let a = 0.5*(unit.y + 1.0);
-                (1.0-a)*Color{x:1.0, y:1.0, z:1.0} + a*Color{x:0.5, y:0.7, z:1.0}
-            }
+            None => self.background
         }
     }
     fn get_ray(&self, i:usize, j:usize) -> Ray{
@@ -592,20 +732,22 @@ impl Camera{
         self.center + p.x * self.defocus_disk_u + p.y * self.defocus_disk_v
     }
     fn new() -> Self {
+        //let background = Color::new(0.70, 0.80, 1.00);
+        let background = Color::ZERO;
         let image_width = unsafe { CONFIGS[0].value } as usize;
         let aspect_ratio = unsafe { CONFIGS[1].value };
         let image_height = ((image_width as Float)/aspect_ratio) as usize;
         let pixel_density = unsafe { CONFIGS[2].value } as usize;
         let inverse_density = (pixel_density as Float).recip();
         let max_depth = unsafe { CONFIGS[3].value } as usize;
-        let lookfrom = Point::Z*9.0;
-        let lookat = Point::ZERO;
+        let lookfrom = Point::new(278., 278., -800.);
+        let lookat = Point::new(278., 278., 0.);
         let vup = Point::Y;
 
         let defocus_angle = 0f64;
         //let focus_dist = 10.0;
         let focus_dist = (lookfrom-lookat).length();
-        let vfov = 80f64;
+        let vfov = 40f64;
         let w = (lookfrom-lookat).normalize();
         let u = vup.cross(w).normalize();
         let v = w.cross(u);
@@ -624,6 +766,7 @@ impl Camera{
         let defocus_disk_u = defocus_radius * u;
         let defocus_disk_v = defocus_radius * v;
         Camera{
+            background,
             aspect_ratio,
             image_width,
             image_height,
@@ -665,8 +808,26 @@ struct Dielectric{
     refractive_index: Float
 }
 
+struct DiffuseLight{
+    tex: Rc<dyn Texture>
+}
+
+impl DiffuseLight{
+    fn from_color(albedo:Color) -> Self{
+        let tex = Rc::new(SolidColor{albedo});
+        Self{tex}
+    }
+}
+
+struct Isotropic{
+    tex: Rc<dyn Texture>
+}
+
 trait Material{
     fn scatter(&self, ray: &Ray, record:&HitRecord) -> Option<(Color, Ray)>;
+    fn emitted(&self, u: UV, p: &Point) -> Color{
+        Color::ZERO
+    }
 }
 
 impl Material for Lambertian{
@@ -710,6 +871,23 @@ impl Material for Dielectric{
     }
 }
 
+impl Material for DiffuseLight{
+    fn scatter(&self, ray: &Ray, record:&HitRecord) -> Option<(Color, Ray)> {
+        None
+    }
+    fn emitted(&self, uv: UV, p: &Point) -> Color {
+        self.tex.texture(uv, p)
+    }
+}
+
+impl Material for Isotropic{
+    fn scatter(&self, ray: &Ray, record:&HitRecord) -> Option<(Color, Ray)> {
+        let scattered = Ray{orig:record.p, dir:Vector::random_unit_vector()};
+        let attenuation = self.tex.texture(record.uv, &record.p);
+        Some((attenuation, scattered))
+    }
+}
+
 impl Dielectric{
     fn reflectance(cos: Float, ri: Float) -> Float{
         let r0 = {
@@ -719,6 +897,17 @@ impl Dielectric{
         r0 * (1.0-r0)*(1.0 - cos).powi(5)
     }
 }
+
+impl Isotropic{
+    fn from_color(albedo: Color) -> Self{
+        let tex = Rc::new(SolidColor{albedo});
+        Self{tex}
+    }
+    fn from_texture(tex: Rc<dyn Texture>) -> Self{
+        Self{tex}
+    }
+}
+
 
 trait Texture{
     fn texture(&self, uv: UV, p: &Point) -> Color;
@@ -753,7 +942,7 @@ impl CheckeredColor{
     fn new(scale: Float, even: Rc<dyn Texture>, odd: Rc<dyn Texture>) -> Self{
         Self{inv_scale:scale.recip(), even, odd}
     }
-    fn from_color(scale: Float, a: &Color, b: &Color) -> Self{
+    fn from_color(scale: Float, a: Color, b: Color) -> Self{
         Self::new(scale, Rc::new(SolidColor{albedo:a.clone()}), Rc::new(SolidColor{albedo:b.clone()}))
     }
 }
@@ -849,6 +1038,71 @@ impl Perlin{
     }
 }
 
+fn cube(a: Point, b: Point, mat: Rc<dyn Material>) -> Rc<HittableList> {
+
+    let mut sides:HittableList  = HittableList::new();
+    
+    let min = Point::new(
+        a.x.min(b.x),
+        a.y.min(b.y),
+        a.z.min(b.z)
+    );
+    let max = Point::new(
+        a.x.max(b.x),
+        a.y.max(b.y),
+        a.z.max(b.z)
+    );
+
+    let dx = Vector::new(max.x - min.x, 0.0, 0.0);
+    let dy = Vector::new(0.0, max.y - min.y, 0.0);
+    let dz = Vector::new(0.0, 0.0, max.z - min.z);
+
+    sides.add(Rc::new(Quad::new( // front
+        Point::new(min.x, min.y, max.z),
+        dx,
+        dy,
+        mat.clone()
+    )));
+    
+    sides.add(Rc::new(Quad::new( // right
+        Point::new(max.x, min.y, max.z),
+        -dz,
+        dy,
+        mat.clone()
+    )));
+    
+    sides.add(Rc::new(Quad::new( // back
+        Point::new(max.x, min.y, min.z),
+        -dx,
+        dy,
+        mat.clone()
+    )));
+    
+    sides.add(Rc::new(Quad::new( // left
+        Point::new(min.x, min.y, min.z),
+        dz,
+        dy,
+        mat.clone()
+    )));
+    
+    sides.add(Rc::new(Quad::new( // top
+        Point::new(min.x, max.y, max.z),
+        dx,
+        -dz,
+        mat.clone()
+    )));
+    
+    sides.add(Rc::new(Quad::new( // bottom
+        Point::new(min.x, min.y, min.z),
+        dx,
+        dz,
+        mat
+    )));
+
+    Rc::new(sides)
+}
+
+
 
 fn classic() {
     let mut world:HittableList  = HittableList::new();
@@ -856,7 +1110,7 @@ fn classic() {
 
     let refractive_index = rand();
 
-    let tex = Rc::new(CheckeredColor::from_color(0.32, &Color::new(0.15, 0.15, 0.15), &Color::new(0.9, 0.9, 0.9)));
+    let tex = Rc::new(CheckeredColor::from_color(0.32, Color::new(0.15, 0.15, 0.15), Color::new(0.9, 0.9, 0.9)));
     let material_ground = Rc::new(Lambertian{tex});
     world.add(Rc::new(Sphere::new(Point{x:0.0, y:-1000., z:-1.0}, 1000., material_ground)));
 
@@ -901,7 +1155,7 @@ fn two_balls(){
     let mut world:HittableList  = HittableList::new();
     let camera: Camera = Camera::new();
 
-    let tex = Rc::new(CheckeredColor::from_color(0.05, &Color::new(0.15, 0.15, 0.15), &Color::new(0.9, 0.9, 0.9)));
+    let tex = Rc::new(CheckeredColor::from_color(0.05, Color::new(0.15, 0.15, 0.15), Color::new(0.9, 0.9, 0.9)));
     let material_ground = Rc::new(Lambertian{tex});
     world.add(Rc::new(Sphere::new(Point{x:0.0, y:10., z:-1.0}, 10., material_ground.clone())));
     world.add(Rc::new(Sphere::new(Point{x:0.0, y:-10., z:-1.0}, 10., material_ground)));
@@ -921,52 +1175,172 @@ fn marbles(){
     camera.render(&world);
 }
 
+fn marble_sunset_plains(){
+    let mut world:HittableList  = HittableList::new();
+    let camera: Camera = Camera::new();
+
+    let tex = Rc::new(NoiseTexture::new(16.0));
+    let mat = Rc::new(Lambertian{tex});
+    let white = Rc::new(Lambertian::from_color(Color::new(0.3, 0.8, 0.4)));
+    let light = Rc::new( DiffuseLight::from_color(Color::ONE*8.0) );
+    let sun = Rc::new( DiffuseLight::from_color(Color::new(0.992, 0.368, 0.325)*2.0) );
+    world.add(Rc::new(Quad::new(
+        Point::new(3., 1., -4.),
+        Vector::new(2., 0., 0.),
+        Vector::new(0., 2., 0.),
+        light
+    )));
+    world.add(Rc::new(Sphere::new(Point::new(-30., 40.0, 0.), 20., sun)));
+    world.add(Rc::new(Sphere::new(Point::new(0., 2.0, 0.), 2., mat.clone())));
+    world.add(Rc::new(Sphere::new(Point::new(0., -1000.0, 0.), 1000., white)));
+    camera.render(&world);
+}
+
 fn cornell(){
     let mut world:HittableList  = HittableList::new();
     let camera: Camera = Camera::new();
-    let left_red = Rc::new(Lambertian::from_color(Color::new(1.0, 0.2, 0.2)));
-    let back_green = Rc::new(Lambertian::from_color(Color::new(0.2, 1.0, 0.2)));
-    let right_blue = Rc::new(Lambertian::from_color(Color::new(0.2, 0.2, 1.0)));
-    let upper_orange = Rc::new(Lambertian::from_color(Color::new(1.0, 0.5, 0.0)));
-    let lower_teal = Rc::new(Lambertian::from_color(Color::new(0.2, 0.8, 0.8)));
+    let red = Rc::new(Lambertian::from_color(Color::new(0.65, 0.05, 0.05)));
+    let white = Rc::new(Lambertian::from_color(Color::new(0.73, 0.73, 0.73)));
+    let green = Rc::new(Lambertian::from_color(Color::new(0.12, 0.45, 0.15)));
+    let light = Rc::new(DiffuseLight::from_color(Color::new(15.0, 15.0, 15.0)));
 
     world.add(Rc::new(Quad::new(
-        Point::new(-3.0, -2.0, 5.0),
-        Vector::new(0.0, 0.0, -4.0),
-        Vector::new(0.0, 4.0, 0.0),
-        left_red
+        Point::new(555.0, 0.0, 0.0),
+        Vector::new(0.0, 555.0, 0.0),
+        Vector::new(0.0, 0.0, 555.0),
+        green
     )));
 
     world.add(Rc::new(Quad::new(
-        Point::new(-2.0, -2.0, 0.0),
-        Vector::new(4.0, 0.0, 0.0),
-        Vector::new(0.0, 4.0, 0.0),
-        back_green
+        Point::new(0.0, 0.0, 0.0),
+        Vector::new(0.0, 555.0, 0.0),
+        Vector::new(0.0, 0.0, 555.0),
+        red
     )));
 
     world.add(Rc::new(Quad::new(
-        Point::new(3.0, -2.0, 1.0),
-        Vector::new(0.0, 0.0, 4.0),
-        Vector::new(0.0, 4.0, 0.0),
-        right_blue
+        Point::new(343.0, 554.0, 332.0),
+        Vector::new(-130.0, 0.0, 0.0),
+        Vector::new(0.0, 0.0, -105.0),
+        light
     )));
 
     world.add(Rc::new(Quad::new(
-        Point::new(-2.0, 3.0, 1.0),
-        Vector::new(4.0, 0.0, 0.0),
-        Vector::new(0.0, 0.0, 4.0),
-        upper_orange
+        Point::new(0.0, 0.0, 0.0),
+        Vector::new(555.0, 0.0, 0.0),
+        Vector::new(0.0, 0.0, 555.0),
+        white.clone()
     )));
 
     world.add(Rc::new(Quad::new(
-        Point::new(-2.0, -3.0, 5.0),
-        Vector::new(4.0, 0.0, 0.0),
-        Vector::new(0.0, 0.0, -4.0),
-        lower_teal
+        Point::new(555.0, 555.0, 555.0),
+        Vector::new(-555.0, 0.0, 0.0),
+        Vector::new(0.0, 0.0, -555.0),
+        white.clone()
     )));
+
+    world.add(Rc::new(Quad::new(
+        Point::new(0.0, 0.0, 555.0),
+        Vector::new(555.0, 0.0, 0.0),
+        Vector::new(0.0, 555.0, 0.0),
+        white.clone()
+    )));
+    let box1 = cube(Point::ZERO, Point::new(165., 330., 165.), white.clone());
+    let box1 = Rc::new(RotateY::new(box1, 15f64.to_radians()));
+    let box1 = Rc::new(Translate::new(box1, Vector::new(265., 0., 295.)));
+
+    let box2 = cube(Point::ZERO, Point::new(165., 165., 165.), white.clone());
+    let box2 = Rc::new(RotateY::new(box2, -18f64.to_radians()));
+    let box2 = Rc::new(Translate::new(box2, Vector::new(130., 0., 65.)));
+
+    world.add(box1);
+    world.add(box2);
+
+    let bvh = Rc::new(BVHNode::from_hittable_list(&mut world));
+    let world = HittableList {
+        objects: vec![bvh.clone()],
+        bbox: bvh.bounding_box().clone()
+    };
+    camera.render(&world);
+}
+fn cornell_smokes(){
+    let mut world:HittableList  = HittableList::new();
+    let camera: Camera = Camera::new();
+    let red = Rc::new(Lambertian::from_color(Color::new(0.65, 0.05, 0.05)));
+    let white = Rc::new(Lambertian::from_color(Color::new(0.73, 0.73, 0.73)));
+    let green = Rc::new(Lambertian::from_color(Color::new(0.12, 0.45, 0.15)));
+    let light = Rc::new(DiffuseLight::from_color(Color::new(7.0, 7.0, 7.0)));
+
+    world.add(Rc::new(Quad::new(
+        Point::new(555.0, 0.0, 0.0),
+        Vector::new(0.0, 555.0, 0.0),
+        Vector::new(0.0, 0.0, 555.0),
+        green
+    )));
+
+    world.add(Rc::new(Quad::new(
+        Point::ZERO,
+        Vector::new(0.0, 555.0, 0.0),
+        Vector::new(0.0, 0.0, 555.0),
+        red
+    )));
+
+    world.add(Rc::new(Quad::new(
+        Point::new(113.0, 554.0, 127.0),
+        Vector::new(330.0, 0.0, 0.0),
+        Vector::new(0.0, 0.0, 305.0),
+        light
+    )));
+
+    world.add(Rc::new(Quad::new(
+        Point::new(0.0, 555.0, 0.0),
+        Vector::new(555.0, 0.0, 0.0),
+        Vector::new(0.0, 0.0, 555.0),
+        white.clone()
+    )));
+
+    world.add(Rc::new(Quad::new(
+        Point::ZERO,
+        Vector::new(555.0, 0.0, 0.0),
+        Vector::new(0.0, 0.0, 555.0),
+        white.clone()
+    )));
+
+    world.add(Rc::new(Quad::new(
+        Point::new(0.0, 0.0, 555.0),
+        Vector::new(555.0, 0.0, 0.0),
+        Vector::new(0.0, 555.0, 0.0),
+        white.clone()
+    )));
+
+    let box1 = cube(
+        Point::ZERO,
+        Point::new(165.0, 330.0, 165.0),
+        white.clone()
+    );
+    let box1 = Rc::new(RotateY::new(box1, 15f64.to_radians()));
+    let box1 = Rc::new(Translate::new(box1, Vector::new(265.0, 0.0, 295.0)));
+
+    let box2 = cube(
+        Point::ZERO,
+        Point::new(165.0, 165.0, 165.0),
+        white.clone()
+    );
+    let box2 = Rc::new(RotateY::new(box2, -18f64.to_radians()));
+    let box2 = Rc::new(Translate::new(box2, Vector::new(130.0, 0.0, 65.0)));
+
+    world.add(Rc::new(ConstantMedium::from_color(box1, 0.0001, Color::ZERO)));
+    world.add(Rc::new(ConstantMedium::from_color(box2, 0.01, Color::ONE)));
+
+    let bvh = Rc::new(BVHNode::from_hittable_list(&mut world));
+    let world = HittableList {
+        objects: vec![bvh.clone()],
+        bbox: bvh.bounding_box().clone()
+    };
+
     camera.render(&world);
 }
 
 fn main() {
-    cornell();
+    cornell_smokes();
 }
