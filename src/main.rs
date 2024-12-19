@@ -1,12 +1,15 @@
 #![allow(unused_variables)]
 #![allow(dead_code)]
-use glam::DVec3;
+use glam::{DVec3,DVec2};
 use std::rc::Rc;
 use std::f64::{INFINITY,NEG_INFINITY};
+use std::f64::consts::PI;
 use rand::prelude::*;
 use rand::distributions::Uniform;
 use std::cell::RefCell;
 use std::sync::Arc;
+use std::ops::Index;
+use std::array::from_fn;
 use rayon::prelude::*;
 
 struct UnsafeSync<T>(T);
@@ -16,6 +19,7 @@ unsafe impl<T> Send for UnsafeSync<T> {}
 type Color = DVec3;
 type Point = DVec3;
 type Vector = DVec3;
+type UV = DVec2;
 type Float = f64;
 
 #[repr(C)]
@@ -27,11 +31,11 @@ pub struct ConfigValue {
 #[link_section = ".data"]
 #[no_mangle]
 static mut CONFIGS: [ConfigValue; 5] = [
-    ConfigValue { marker: *b"COEF_F1_", value: 1080.0 }, // width
+    ConfigValue { marker: *b"COEF_F1_", value: 400.0 }, // width
     ConfigValue { marker: *b"COEF_F2_", value: 16.0/9.0 }, // aspect ratio
-    ConfigValue { marker: *b"COEF_F3_", value: 1024.0 }, // pixel density
-    ConfigValue { marker: *b"COEF_F4_", value: 100.0 }, // max bounce
-    ConfigValue { marker: *b"COEF_F5_", value: 0.2 }, // gamut
+    ConfigValue { marker: *b"COEF_F3_", value: 100.0 }, // pixel density
+    ConfigValue { marker: *b"COEF_F4_", value: 50.0 }, // max bounce
+    ConfigValue { marker: *b"COEF_F5_", value: 4.0 }, // 
 ];
 
 thread_local! {
@@ -48,13 +52,6 @@ thread_local! {
     ));
 }
 
-thread_local! {
-    static AXIS_RNG: RefCell<(ThreadRng, Uniform<usize>)> = RefCell::new((
-        thread_rng(),
-        Uniform::new_inclusive(0, 2)
-    ));
-}
-
 fn linear_to_gamma(linear: Float) -> Float{
     if linear>0.0 {linear.sqrt()} else {0.0}
 }
@@ -63,13 +60,6 @@ fn rand() -> Float{
     SQUARE_RNG.with(|rng| {
         let (rng, distribution) = &mut *rng.borrow_mut();
         distribution.sample(rng).abs()
-    })
-}
-
-fn random_axis() -> usize{
-    AXIS_RNG.with(|rng| {
-        let (rng, distribution) = &mut *rng.borrow_mut();
-        distribution.sample(rng)
     })
 }
 
@@ -94,7 +84,6 @@ trait Utils {
     fn random()->Self;
     fn near_zero(&self) -> bool;
     fn reflect(&self, n: &Self) -> Self;
-    fn refract(&self, n: &Self, refractive_ratio:Float) -> Self;
 }
 
 impl Utils for Vector {
@@ -139,7 +128,7 @@ impl Utils for Vector {
     fn random()->Self{
             SQUARE_RNG.with(|rng| {
                 let (rng, distribution) = &mut *rng.borrow_mut();
-                Point {
+                Self {
                     x: distribution.sample(rng),
                     y: distribution.sample(rng),
                     z: distribution.sample(rng),
@@ -156,19 +145,11 @@ impl Utils for Vector {
     fn reflect(&self, n: &Self) -> Self{
         self - 2.0*self.dot(*n)*n
     }
-    fn refract(&self, n: &Self, refractive_ratio:Float) -> Self{
-        let cos = n.dot(-*self).min(1.0);
-        let r_perp = refractive_ratio * (self + cos*n);
-        let r_par = -(1.0-r_perp.length_squared()).abs().sqrt()*n;
-        r_par + r_perp
-    }
 }
 
-#[derive(Default)]
 struct Ray{
     orig:Point,
     dir:Point,
-    t:Float
 }
 
 impl Ray{
@@ -177,24 +158,26 @@ impl Ray{
     }
 }
 
-#[derive(Default)]
+#[derive(Clone)]
 struct HitRecord{
     p: Point,
     n: Vector,
-    mat: Option<Rc<dyn Material>>,
+    mat: Rc<dyn Material>,
     t: Float,
     front: bool,
+    uv: UV,
 }
 
 impl HitRecord{
-    fn set_face_normal(&mut self, ray: &Ray, outward_normal: &Vector){
+    fn set_face_normal(&mut self, ray: &Ray, outward_normal: Vector) -> &Self{
         self.front = outward_normal.dot(ray.dir) < 0.;
-        self.n =   if self.front {*outward_normal} else {-*outward_normal};
+        self.n =   if self.front {outward_normal} else {-outward_normal};
+        self
     }
 }
 
 trait Hittable{
-    fn hit(&self, ray: &Ray, t:&Interval, record:&mut HitRecord) -> bool;
+    fn hit(&self, ray: &Ray, t:&Interval) -> Option<HitRecord>;
     fn bounding_box(&self) -> &AABB;
 }
 
@@ -206,30 +189,27 @@ struct Sphere{
 }
 
 impl Hittable for Sphere{
-    fn hit(&self, ray: &Ray, t:&Interval, record:&mut HitRecord) -> bool{
+    fn hit(&self, ray: &Ray, t:&Interval) -> Option<HitRecord>{
         let oc = self.center - ray.orig;
         let a = ray.dir.length_squared();
         let h = ray.dir.dot(oc);
         let c = oc.length_squared() - self.radius*self.radius;
         let discriminant = h*h - a*c;
         if discriminant < 0.0 {
-            false
+            None
         } else{
             let sqrtd = discriminant.sqrt();
             let mut root = (h - sqrtd) / a;
             if  !t.surrounds(root){
                 root = (h + sqrtd) / a;
                 if  !t.surrounds(root){
-                    return false;
+                    return None;
                 }
             }
-            record.t = root;
-            record.p = ray.at(record.t);
-            let outward_normal = (record.p - self.center) / self.radius;
-            record.set_face_normal(ray, &outward_normal);
-            record.mat = Some(self.mat.clone());
-
-            return true;
+            let p = ray.at(root);
+            let outward_normal = (p - self.center) / self.radius;
+            let mat = self.mat.clone();
+            return Some(HitRecord{t:root, p, mat, n:Point::ZERO, front:false, uv:Sphere::get_sphere_uv(&outward_normal)}.set_face_normal(ray, outward_normal).clone());
         }
 
     }
@@ -237,6 +217,62 @@ impl Hittable for Sphere{
         &self.bbox
     }
 
+}
+
+struct Quad{
+    q: Point,
+    u: Point,
+    v: Point,
+    n: Vector,
+    w: Vector,
+    d: Float,
+    mat: Rc<dyn Material>,
+    bbox: AABB,
+}
+
+impl Quad{
+    fn new(q: Vector, u:Vector, v:Vector, mat:Rc<dyn Material>)->Self{
+        let a = AABB::enclosing_point(&q, &(q+u+v));
+        let b = AABB::enclosing_point(&(q+u), &(q+v));
+        let bbox = AABB::enclosing_volume(&a, &b);
+        let normal = u.cross(v);
+        let w = normal/normal.length_squared();
+        let n = normal.normalize();
+        let d = n.dot(q);
+        Self{q, u, v, mat, bbox, n, d, w}
+    }
+    fn is_interior(a: Float, b: Float) -> Option<UV> {
+        const UNIT: Interval = Interval{min:0.0, max:1.0};
+        if !UNIT.contains(a) || !UNIT.contains(b) {
+            None
+        } else {
+            Some(UV{x:a,y:b})
+        }
+    }
+}
+
+impl Hittable for Quad{
+    fn hit(&self, ray: &Ray, t:&Interval) -> Option<HitRecord> {
+        let denom = ray.dir.dot(self.n);
+        if denom.abs() < 1e-8 {
+            None
+        } else {
+            let root = (self.d - self.n.dot(ray.orig))/denom;
+            if !t.contains(root){
+                None
+            } else {
+                let p = ray.at(root);
+                let planar_p = p - self.q;
+                let alpha = self.w.dot(planar_p.cross(self.v));
+                let beta = self.w.dot(self.u.cross(planar_p));
+                let mat = self.mat.clone();
+                Quad::is_interior(alpha, beta).map(|uv| HitRecord{t:root, p, mat, n:Point::ZERO, front:false, uv}.set_face_normal(ray, self.n).clone())
+            }
+        }
+    }
+    fn bounding_box(&self) -> &AABB {
+        &self.bbox
+    }
 }
 
 struct HittableList{
@@ -255,11 +291,8 @@ impl HittableList{
 }
 
 impl Hittable for HittableList{
-    fn hit(&self, ray: &Ray, t:&Interval, record:&mut HitRecord) -> bool{
-        let mut record_tmp = Default::default();
-        let mut did_hit = false;
+    fn hit(&self, ray: &Ray, t:&Interval) -> Option<HitRecord>{
         let mut t_least = t.max;
-
         // &Vec<T> borrws whereas
         // Vec<T> consumes and should fall, but since stays, invalid code
         /*
@@ -281,15 +314,21 @@ impl Hittable for HittableList{
         * If it weren't dropped, say A has a Box<T> and looping through A we push the elements to
         * B, here when finally going out of scope, double free can occur.
         */
-        for object in &self.objects{
+
+        self.objects.iter()
+            .filter_map(|object| {
+                // Only closer objects are permitted after each iteration
+                match object.hit(ray, &mut Interval { min: t.min, max: t_least }) {
+                    Some(record_tmp) => {
+                        t_least = record_tmp.t;
+                        Some(record_tmp)
+                    }
+                    None => None,
+                }
+            })
+            .last()
+
             // only closer objects permitted after each iter
-            if object.hit(ray, &mut Interval{min:t.min, max:t_least}, &mut record_tmp) {
-                did_hit = true;
-                t_least = record_tmp.t;
-                std::mem::swap(record, &mut record_tmp);
-            }
-        }
-        did_hit
     }
     fn bounding_box(&self) -> &AABB {
         &self.bbox
@@ -303,9 +342,16 @@ impl Sphere{
         let bbox = AABB::enclosing_point(&(center - r), &(center + r));
         Sphere{center, radius, mat, bbox}
     }
+    fn get_sphere_uv(p: &Point) -> UV{
+        let t = (-p.y).acos();
+        let f = (-p.z).atan2(p.x) + PI;
+        let u = f/(2.*PI);
+        let v = t/PI;
+        UV{x:u, y:v}
+    }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Interval{
     min:Float,
     max:Float,
@@ -339,14 +385,14 @@ impl Interval{
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct AABB{
     x: Interval,
     y: Interval,
     z: Interval
 }
 
-impl std::ops::Index<usize> for AABB {
+impl Index<usize> for AABB {
     type Output = Interval;
     fn index(&self, index: usize) -> &Self::Output {
         match index {
@@ -368,13 +414,13 @@ impl AABB{
         let x = Interval::ordered(a.x, b.x);
         let y = Interval::ordered(a.y, b.y);
         let z = Interval::ordered(a.z, b.z);
-        Self{x, y, z}
+        Self{x, y, z}.padded()
     }
     fn enclosing_volume(a: &Self, b: &Self) -> Self{
         let x = Interval::enclosing(&a.x, &b.x);
         let y = Interval::enclosing(&a.y, &b.y);
         let z = Interval::enclosing(&a.z, &b.z);
-        Self{x, y, z}
+        Self{x, y, z}.padded()
     }
     fn hit(&self, ray: &Ray, ray_t: &Interval) -> bool{
         for axis in 0..3{
@@ -401,6 +447,13 @@ impl AABB{
             2
         }
     }
+    fn padded(self) -> Self{
+        const DELTA: Float = 0.0001;
+        let x = if self.x.len() < DELTA { self.x.expanded(DELTA) } else {self.x};
+        let y = if self.y.len() < DELTA { self.y.expanded(DELTA) } else {self.y};
+        let z = if self.z.len() < DELTA { self.z.expanded(DELTA) } else {self.z};
+        Self{x, y, z}
+    }
 }
 
 struct BVHNode{
@@ -410,13 +463,19 @@ struct BVHNode{
 }
 
 impl Hittable for BVHNode{
-    fn hit(&self, ray: &Ray, t:&Interval, record:&mut HitRecord) -> bool {
+    fn hit(&self, ray: &Ray, t:&Interval) -> Option<HitRecord>{
         if !self.bbox.hit(ray, t){
-            false
+            None
         } else {
-            let hit_left = self.left.hit(ray, t, record);
-            let hit_right = self.right.hit(ray, &mut Interval{min:t.min, max: if hit_left {record.t} else {t.max}}, record); // records are modified only if hit before left, otherwise only record_tmp is used
-            hit_left || hit_right
+            self.left.hit(ray, t).map_or_else(
+                || self.right.hit(ray, t),
+                |record| {
+                    self.right.hit(ray, &Interval {
+                        min: t.min,
+                        max: record.t,
+                    }).or(Some(record))
+                },
+            )
         }
     }
     fn bounding_box(&self) -> &AABB {
@@ -477,6 +536,7 @@ struct Camera{
     pixel_delta_v: Vector,
     defocus_disk_u: Vector,
     defocus_disk_v: Vector,
+    defocus_angle: Float,
     u:Vector,
     v:Vector,
     w:Vector,
@@ -485,14 +545,6 @@ struct Camera{
 impl Camera{
     fn render(&self, world:&dyn Hittable) {
         println!("P3\n{} {}\n255\n", self.image_width, self.image_height);
-        //for j in 0..self.image_height{
-        //    for i in 0..self.image_width{
-        //        let pixel_color:Color = (0..self.pixel_density)
-        //            .map(|_| Camera::color(&self.get_ray(i, j), world, self.max_depth))
-        //            .sum::<Color>()*self.inverse_density;
-        //        pixel_color.write();
-        //    }
-        //}
         let mut data = vec![Color::ZERO; self.image_height*self.image_width];
         let unsafe_world = Arc::new(UnsafeSync(world));
         data.par_iter_mut().enumerate().for_each(|(x, c)| {
@@ -507,64 +559,59 @@ impl Camera{
         for c in data{
             c.write();
         }
-
     }
     fn color(ray: &Ray, world:&dyn Hittable, depth: usize) -> Color{
         if depth==0{
             return Color::ZERO;
         }
-        let mut record: HitRecord = Default::default();
-        if  world.hit(ray, &mut Interval{min:0.001, max:INFINITY}, &mut record) {
-            let mut attenuation = Color::ZERO;
-            let mut scattered = Default::default();
-            // Option<T>::as_ref() -> Option<&T>
-            if  record.mat.as_ref().unwrap().scatter(ray, &record, &mut attenuation, &mut scattered) {
-                return attenuation * Camera::color(&scattered, world, depth-1);
-            } else{
-                return Color::ZERO;
+        match world.hit(ray, &mut Interval{min:0.001, max:INFINITY}){
+            Some(record) => {
+                // Option<T>::as_ref() -> Option<&T>
+                match  record.mat.as_ref().scatter(ray, &record){
+                    Some((attenuation, scattered)) =>
+                    attenuation * Camera::color(&scattered, world, depth-1),
+                    None => Color::ZERO
+                }
+            },
+            None => {
+                let unit = ray.dir.normalize();
+                let a = 0.5*(unit.y + 1.0);
+                (1.0-a)*Color{x:1.0, y:1.0, z:1.0} + a*Color{x:0.5, y:0.7, z:1.0}
             }
-        }
-        else{
-            let unit = ray.dir.normalize();
-            let a = 0.5*(unit.y + 1.0);
-            (1.0-a)*Color{x:1.0, y:1.0, z:1.0} + a*Color{x:0.5, y:0.7, z:1.0}
         }
     }
     fn get_ray(&self, i:usize, j:usize) -> Ray{
         let offset = Vector::random_on_pixel();
         let pixel_sample = self.pixel_corner + ((i as Float + offset.x) * self.pixel_delta_u) + ((j as Float + offset.y) * self.pixel_delta_v);
-        let ray_origin = self.defocus_disk_sample();
+        let ray_origin = if self.defocus_angle > 0. {self.defocus_disk_sample()} else {self.center};
         let ray_direction = pixel_sample - ray_origin;
-        Ray{orig:ray_origin, dir:ray_direction, t:0.0}
+        Ray{orig:ray_origin, dir:ray_direction}
     }
     fn defocus_disk_sample(&self) -> Point{
         let p = Point::random_on_disk();
         self.center + p.x * self.defocus_disk_u + p.y * self.defocus_disk_v
     }
-}
-
-impl Camera{
     fn new() -> Self {
-        let image_width = unsafe{ CONFIGS[0].value as usize};
-        let aspect_ratio = unsafe {CONFIGS[1].value};
+        let image_width = unsafe { CONFIGS[0].value } as usize;
+        let aspect_ratio = unsafe { CONFIGS[1].value };
         let image_height = ((image_width as Float)/aspect_ratio) as usize;
-        let pixel_density = unsafe{CONFIGS[2].value as usize};
+        let pixel_density = unsafe { CONFIGS[2].value } as usize;
         let inverse_density = (pixel_density as Float).recip();
-        let max_depth = unsafe{ CONFIGS[3].value as usize} ;
-        let lookfrom = Point{x:13.0, y:2.0, z:3.0};
+        let max_depth = unsafe { CONFIGS[3].value } as usize;
+        let lookfrom = Point::Z*9.0;
         let lookat = Point::ZERO;
         let vup = Point::Y;
 
-        let defocus_angle = 0.6f64;
-        assert!(defocus_angle>0.);
-        let focus_dist = 10.0;
-        let vfov = 20f64;
+        let defocus_angle = 0f64;
+        //let focus_dist = 10.0;
+        let focus_dist = (lookfrom-lookat).length();
+        let vfov = 80f64;
         let w = (lookfrom-lookat).normalize();
         let u = vup.cross(w).normalize();
         let v = w.cross(u);
         let h = (vfov/2.).to_radians().tan();
-        let viewport_h:Float = 2.0*h*focus_dist;
-        let viewport_w:Float = viewport_h*(image_width as Float/image_height as Float);
+        let viewport_h = 2.0*h*focus_dist;
+        let viewport_w = viewport_h*(image_width as Float/image_height as Float);
         let center = lookfrom;
         let viewport_u = viewport_w * u;
         let viewport_v = viewport_h * -v;
@@ -590,6 +637,7 @@ impl Camera{
             pixel_delta_v,
             defocus_disk_u,
             defocus_disk_v,
+            defocus_angle,
             u,
             v,
             w
@@ -598,7 +646,14 @@ impl Camera{
 }
 
 struct Lambertian{
-    albedo: Color,
+    tex: Rc<dyn Texture>
+}
+
+impl Lambertian{
+    fn from_color(albedo:Color) -> Self{
+        let tex = Rc::new(SolidColor{albedo});
+        Self{tex}
+    }
 }
 
 struct Metal{
@@ -611,48 +666,47 @@ struct Dielectric{
 }
 
 trait Material{
-    fn scatter(&self, ray: &Ray, record:&HitRecord, attenuation:&mut Color, scattered: &mut Ray) -> bool;
+    fn scatter(&self, ray: &Ray, record:&HitRecord) -> Option<(Color, Ray)>;
 }
 
 impl Material for Lambertian{
-    fn scatter(&self, ray: &Ray, record:&HitRecord, attenuation:&mut Color, scattered: &mut Ray) -> bool{
+    fn scatter(&self, ray: &Ray, record:&HitRecord) -> Option<(Color, Ray)>{
         let scatter_direction = {
             let dir = record.n + Vector::random_unit_vector();
             if dir.near_zero() { record.n } else { dir }
         };
-        *scattered = Ray{orig:record.p, dir:scatter_direction, t:0.0};
-        *attenuation = self.albedo;
-        return true;
+        let scattered = Ray{orig:record.p, dir:scatter_direction};
+        let attenuation = self.tex.texture(record.uv, &record.p);
+        Some((attenuation, scattered))
     }
 }
 
 impl Material for Metal{
-    fn scatter(&self, ray: &Ray, record:&HitRecord, attenuation:&mut Color, scattered: &mut Ray) -> bool{
+    fn scatter(&self, ray: &Ray, record:&HitRecord) -> Option<(Color, Ray)>{
         let reflected = {
             let dir:Vector = ray.dir.reflect(record.n);
             dir.normalize() + (self.fuzz * Vector::random_unit_vector())
         };
-        *scattered = Ray{orig:record.p, dir:reflected, t:0.0};
-        *attenuation = self.albedo;
-        return true;
+        let scattered = Ray{orig:record.p, dir:reflected};
+        let attenuation = self.albedo;
+        Some((attenuation, scattered))
     }
 }
 
 impl Material for Dielectric{
-    fn scatter(&self, ray: &Ray, record:&HitRecord, attenuation:&mut Color, scattered: &mut Ray) -> bool{
+    fn scatter(&self, ray: &Ray, record:&HitRecord) -> Option<(Color, Ray)>{
         let ri = if record.front {self.refractive_index.recip()} else {self.refractive_index};
         let unit = ray.dir.normalize();
-        let refracted = unit.refract(record.n, ri);
         let cos = record.n.dot(-unit).min(1.0);
         let sin = (1.0 - cos*cos).sqrt();
-        let dir= if ri * sin > 1.0 || Dielectric::reflectance(cos, ri) > rand(){
+        let dir = if ri * sin > 1.0 || Dielectric::reflectance(cos, ri) > rand(){
             unit.reflect(record.n)
         } else{
             unit.refract(record.n, ri)
         };
-        *scattered = Ray{orig:record.p, dir, t: 0.0 };
-        *attenuation = Color::ONE;
-        return true;
+        let scattered = Ray{orig:record.p, dir};
+        let attenuation = Color::ONE;
+        Some((attenuation, scattered))
     }
 }
 
@@ -666,50 +720,253 @@ impl Dielectric{
     }
 }
 
+trait Texture{
+    fn texture(&self, uv: UV, p: &Point) -> Color;
+}
+
+struct SolidColor{
+    albedo: Color,
+}
+
+struct CheckeredColor{
+    inv_scale: Float,
+    even: Rc<dyn Texture>,
+    odd: Rc<dyn Texture>,
+}
+
+struct NoiseTexture {
+    noise: Perlin,
+    scale: Float,
+}
+
+impl SolidColor{
+    fn from_color(albedo: Color) -> Self{
+        Self{albedo}
+    }
+    fn from_rgb(x: Float, y: Float, z:Float) -> Self{
+        let albedo = Color{x, y, z};
+        Self{albedo}
+    }
+}
+
+impl CheckeredColor{
+    fn new(scale: Float, even: Rc<dyn Texture>, odd: Rc<dyn Texture>) -> Self{
+        Self{inv_scale:scale.recip(), even, odd}
+    }
+    fn from_color(scale: Float, a: &Color, b: &Color) -> Self{
+        Self::new(scale, Rc::new(SolidColor{albedo:a.clone()}), Rc::new(SolidColor{albedo:b.clone()}))
+    }
+}
+impl NoiseTexture {
+    fn new(scale: Float) -> Self {
+        Self { noise: Perlin::new(), scale}
+    }
+}
+
+impl Texture for NoiseTexture {
+    fn texture(&self, uv: UV, p: &Point) -> Color {
+        let x = 1.0 * p;
+        Color::ONE *  0.5 * (1.0 + (8.0*p.z + 10.*self.noise.turbulence(&x, 7)).sin())
+    }
+}
+
+impl Texture for SolidColor {
+    fn texture(&self, _: UV, p: &Point) -> Color{
+        return self.albedo;
+    }
+}
 
 
-fn main() {
+impl Texture for CheckeredColor{
+    fn texture(&self, uv: UV, p: &Point) -> Color {
+        match (0..2).map(|i| (self.inv_scale * uv[i]).floor() as isize ).sum::<isize>() % 2 == 0{
+            true => self.even.texture(uv, p),
+            false => self.odd.texture(uv, p),
+        }
+    }
+}
+
+struct Perlin{
+    perm: [[usize; 256];3],
+    ranvec: [Vector; 256],
+}
+
+impl Perlin{
+    fn generate_perm() -> [usize; 256]{
+        let mut p:[usize;256] = from_fn(|i| i);
+        let mut rng = thread_rng();
+        for i in (1..256).rev(){
+            let t = rng.gen_range(0..=i);
+            p.swap(i, t);
+        }
+        p
+    }
+    fn new() -> Self{
+        let ranvec = from_fn(|_| Vector::random_unit_vector());
+        let perm = [
+            Perlin::generate_perm(),
+            Perlin::generate_perm(),
+            Perlin::generate_perm(),
+        ];
+        Self{perm, ranvec}
+    }
+    fn noise(&self, p: &Point) -> Float{
+        let u = p.map(|v| {
+            let f = v.fract();
+            if f < 0.0 { f + 1.0 } else { f }
+        });
+        let i = p.map(|v| v.floor());
+        let c = from_fn(|di| from_fn(|dj| from_fn(|dk|
+            self.ranvec[
+            self.perm[0][((i[0] as isize + di as isize ) & 255) as usize] ^ 
+            self.perm[1][((i[1] as isize + dj as isize ) & 255) as usize] ^ 
+            self.perm[2][((i[2] as isize + dk as isize ) & 255) as usize] ]
+        )));
+        Perlin::perlin_interpolate(c, u)
+    }
+    fn perlin_interpolate(c:[[[Vector;2];2];2], u:Vector) -> Float{
+        let uu = u*u*(3.-2.*u);
+        (0..2).flat_map(|i| (0..2).flat_map(move |j| (0..2).map(move |k|{
+            let weight = Vector::new(u.x - i as Float, u.y - j as Float, u.z - k as Float);
+            (if i == 0 { 1.0 - uu.x } else { uu.x })*
+            (if j == 0 { 1.0 - uu.y } else { uu.y })*
+            (if k == 0 { 1.0 - uu.z } else { uu.z })*
+            c[i][j][k].dot(weight)
+        }
+        ))).sum::<Float>()
+    }
+    fn turbulence(&self, p:&Point, depth: usize) -> Float{
+        let mut sum = 0.;
+        let mut temp_p = p.clone();
+        let mut weight = 1.0;
+
+        for i in 0..depth{
+            sum+=weight*self.noise(&temp_p);
+            weight*=0.5;
+            temp_p*=2.;
+        }
+        sum.abs()
+    }
+}
+
+
+fn classic() {
     let mut world:HittableList  = HittableList::new();
     let camera: Camera = Camera::new();
 
-    let material_ground = Rc::new(Lambertian{albedo: Color{x:0.5, y:0.5, z:0.5}});
+    let refractive_index = rand();
+
+    let tex = Rc::new(CheckeredColor::from_color(0.32, &Color::new(0.15, 0.15, 0.15), &Color::new(0.9, 0.9, 0.9)));
+    let material_ground = Rc::new(Lambertian{tex});
     world.add(Rc::new(Sphere::new(Point{x:0.0, y:-1000., z:-1.0}, 1000., material_ground)));
 
-    let material1 = Rc::new(Dielectric{refractive_index:1.5});
-    world.add(Rc::new(Sphere::new(Point{x:0.0, y:1.0, z:0.0}, 1.0, material1)));
+    let material1 = Rc::new(Dielectric{refractive_index:refractive_index.recip()});
+    world.add(Rc::new(Sphere::new(Point{x:0.0, y:1.0, z:-1.0}, 1.0, material1)));
 
-    let material2 = Rc::new(Lambertian{albedo: Color{x:0.4, y:0.2, z:0.1}});
-    world.add(Rc::new(Sphere::new(Point{x:-4.0, y:1.0, z:0.0}, 1.0, material2)));
+    let material2 = Rc::new(Lambertian::from_color(Color{x:0.4, y:0.2, z:0.1}));
+    world.add(Rc::new(Sphere::new(Point{x:0.0, y:1.0, z:1.0}, 1.0, material2)));
 
-    let material3 = Rc::new(Lambertian{albedo: Color{x:0.7, y:0.6, z:0.0}});
-    world.add(Rc::new(Sphere::new(Point{x:4.0, y:1.0, z:0.0}, 1.0, material3)));
-
-    for a in -11..11{
-        for b in -11..11{
-
-            let center = Point{x:a as Float + 0.9*rand(), y:0.2, z:b as Float + 0.9*rand()};
-            let mat = match rand(){
-                0.0..0.8 => {
-                    let albedo = Color::random() * Color::random();
-                    Rc::new(Lambertian{albedo}) as Rc<dyn Material>
-                },
-                0.8..0.95 => {
-                    let albedo = (Color::random() + 1.)/2.0;
-                    let fuzz = rand()/2.0;
-                    Rc::new(Metal{albedo, fuzz}) as Rc<dyn Material>
-                },
-                _ => {
-                    Rc::new(Dielectric{refractive_index: 1.5}) as Rc<dyn Material>
-                }
-            };
-            world.add(Rc::new(Sphere::new(center, 0.2, mat)));
-        }
+    let r = 2.;
+    let n = 7;
+    let t = 2.*PI/n as Float;
+    for a in 0..n{
+        let y = rand()/2.;
+        let center = Point{x:r*(a as Float * t).cos(), y, z:2.*r*(a as Float*t).sin()};
+        let mat = match rand(){
+            0.0..0.6 => {
+                let albedo = Color::random() * Color::random();
+                Rc::new(Lambertian::from_color(albedo)) as Rc<dyn Material>
+            },
+            0.6..0.85 => {
+                let albedo = (Color::random() + 1.)/2.0;
+                let fuzz = rand()/2.0;
+                Rc::new(Metal{albedo, fuzz}) as Rc<dyn Material>
+            },
+            _ => {
+                Rc::new(Dielectric{refractive_index: rand()}) as Rc<dyn Material>
+            }
+        };
+        world.add(Rc::new(Sphere::new(center, y, mat)));
     }
     let bvh = Rc::new(BVHNode::from_hittable_list(&mut world));
     let world = HittableList {
         objects: vec![bvh.clone()],
-        bbox: *bvh.bounding_box()
+        bbox: bvh.bounding_box().clone()
     };
 
     camera.render(&world);
+}
+
+fn two_balls(){
+    let mut world:HittableList  = HittableList::new();
+    let camera: Camera = Camera::new();
+
+    let tex = Rc::new(CheckeredColor::from_color(0.05, &Color::new(0.15, 0.15, 0.15), &Color::new(0.9, 0.9, 0.9)));
+    let material_ground = Rc::new(Lambertian{tex});
+    world.add(Rc::new(Sphere::new(Point{x:0.0, y:10., z:-1.0}, 10., material_ground.clone())));
+    world.add(Rc::new(Sphere::new(Point{x:0.0, y:-10., z:-1.0}, 10., material_ground)));
+
+    camera.render(&world);
+}
+
+fn marbles(){
+    let mut world:HittableList  = HittableList::new();
+    let camera: Camera = Camera::new();
+
+    let tex = Rc::new(NoiseTexture::new(16.0));
+    let mat = Rc::new(Lambertian{tex});
+    world.add(Rc::new(Sphere::new(Point::new(0., 2.0, 0.), 2., mat.clone())));
+    world.add(Rc::new(Sphere::new(Point::new(0., -1000.0, 0.), 1000., mat)));
+
+    camera.render(&world);
+}
+
+fn cornell(){
+    let mut world:HittableList  = HittableList::new();
+    let camera: Camera = Camera::new();
+    let left_red = Rc::new(Lambertian::from_color(Color::new(1.0, 0.2, 0.2)));
+    let back_green = Rc::new(Lambertian::from_color(Color::new(0.2, 1.0, 0.2)));
+    let right_blue = Rc::new(Lambertian::from_color(Color::new(0.2, 0.2, 1.0)));
+    let upper_orange = Rc::new(Lambertian::from_color(Color::new(1.0, 0.5, 0.0)));
+    let lower_teal = Rc::new(Lambertian::from_color(Color::new(0.2, 0.8, 0.8)));
+
+    world.add(Rc::new(Quad::new(
+        Point::new(-3.0, -2.0, 5.0),
+        Vector::new(0.0, 0.0, -4.0),
+        Vector::new(0.0, 4.0, 0.0),
+        left_red
+    )));
+
+    world.add(Rc::new(Quad::new(
+        Point::new(-2.0, -2.0, 0.0),
+        Vector::new(4.0, 0.0, 0.0),
+        Vector::new(0.0, 4.0, 0.0),
+        back_green
+    )));
+
+    world.add(Rc::new(Quad::new(
+        Point::new(3.0, -2.0, 1.0),
+        Vector::new(0.0, 0.0, 4.0),
+        Vector::new(0.0, 4.0, 0.0),
+        right_blue
+    )));
+
+    world.add(Rc::new(Quad::new(
+        Point::new(-2.0, 3.0, 1.0),
+        Vector::new(4.0, 0.0, 0.0),
+        Vector::new(0.0, 0.0, 4.0),
+        upper_orange
+    )));
+
+    world.add(Rc::new(Quad::new(
+        Point::new(-2.0, -3.0, 5.0),
+        Vector::new(4.0, 0.0, 0.0),
+        Vector::new(0.0, 0.0, -4.0),
+        lower_teal
+    )));
+    camera.render(&world);
+}
+
+fn main() {
+    cornell();
 }
