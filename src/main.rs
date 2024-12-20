@@ -740,7 +740,7 @@ impl Camera{
         let pixel_density = unsafe { CONFIGS[2].value } as usize;
         let inverse_density = (pixel_density as Float).recip();
         let max_depth = unsafe { CONFIGS[3].value } as usize;
-        let lookfrom = Point::new(278., 278., -800.);
+        let lookfrom = Point::new(478., 278., -600.);
         let lookat = Point::new(278., 278., 0.);
         let vup = Point::Y;
 
@@ -1329,7 +1329,7 @@ fn cornell_smokes(){
     let box2 = Rc::new(RotateY::new(box2, -18f64.to_radians()));
     let box2 = Rc::new(Translate::new(box2, Vector::new(130.0, 0.0, 65.0)));
 
-    world.add(Rc::new(ConstantMedium::from_color(box1, 0.0001, Color::ZERO)));
+    world.add(Rc::new(ConstantMedium::from_color(box1, 0.001, Color::ZERO)));
     world.add(Rc::new(ConstantMedium::from_color(box2, 0.01, Color::ONE)));
 
     let bvh = Rc::new(BVHNode::from_hittable_list(&mut world));
@@ -1341,6 +1341,119 @@ fn cornell_smokes(){
     camera.render(&world);
 }
 
+fn tnw() {
+    let camera = Camera::new();
+    let mut boxes1 = HittableList::new();
+    let ground = Rc::new(Lambertian::from_color(Color::new(0.48, 0.83, 0.53)));
+
+    let boxes_per_side = 20;
+    for i in 0..boxes_per_side {
+        for j in 0..boxes_per_side {
+            let w = 100.0;
+            let x0 = -1000.0 + (i as Float) * w;
+            let z0 = -1000.0 + (j as Float) * w;
+            let y0 = 0.0;
+            let x1 = x0 + w;
+            let y1 = 1.0 + rand() * 100.0;
+            let z1 = z0 + w;
+            boxes1.add(cube(
+                Point::new(x0, y0, z0),
+                Point::new(x1, y1, z1),
+                ground.clone()
+            ));
+        }
+    }
+
+    let mut world = HittableList::new();
+
+    let boxes1 = Rc::new(BVHNode::from_hittable_list(&mut boxes1));
+    world.add(boxes1);
+
+    let light = Rc::new(DiffuseLight::from_color(Color::new(7.0, 7.0, 7.0)));
+    world.add(Rc::new(Quad::new(
+        Point::new(123.0, 554.0, 147.0),
+        Vector::new(300.0, 0.0, 0.0),
+        Vector::new(0.0, 0.0, 265.0),
+        light
+    )));
+
+    let center1 = Point::new(400.0, 400.0, 200.0);
+    let sphere_material = Rc::new(Lambertian::from_color(Color::new(0.7, 0.3, 0.1)));
+    world.add(Rc::new(Sphere::new(center1, 50.0, sphere_material)));
+
+    world.add(Rc::new(Sphere::new(
+        Point::new(260.0, 150.0, 45.0),
+        50.0,
+        Rc::new(Dielectric { refractive_index: 1.5 })
+    )));
+    
+    world.add(Rc::new(Sphere::new(
+        Point::new(0.0, 150.0, 145.0),
+        50.0,
+        Rc::new(Metal {
+            albedo: Color::new(0.8, 0.8, 0.9),
+            fuzz: 1.0
+        })
+    )));
+
+    let boundary = Rc::new(Sphere::new(
+        Point::new(360.0, 150.0, 145.0),
+        70.0,
+        Rc::new(Dielectric { refractive_index: 1.5 })
+    ));
+    world.add(boundary.clone());
+    world.add(Rc::new(ConstantMedium::from_color(
+        boundary.clone(),
+        0.2,
+        Color::new(0.2, 0.4, 0.9)
+    )));
+    
+    let boundary = Rc::new(Sphere::new(
+        Point::ZERO,
+        5000.0,
+        Rc::new(Dielectric { refractive_index: 1.5 })
+    ));
+    world.add(Rc::new(ConstantMedium::from_color(
+        boundary,
+        0.0001,
+        Color::ONE
+    )));
+
+    //let emat = Rc::new(Lambertian::from_texture(Rc::new(ImageTexture::new("earthmap.jpg"))));
+    //world.add(Rc::new(Sphere::new(
+    //    Point::new(400.0, 200.0, 400.0),
+    //    100.0,
+    //    emat
+    //)));
+    
+    let pertext = Rc::new(NoiseTexture::new(0.2));
+    world.add(Rc::new(Sphere::new(
+        Point::new(220.0, 280.0, 300.0),
+        80.0,
+        Rc::new(Lambertian { tex: pertext })
+    )));
+
+    let mut boxes2 = HittableList::new();
+    let white = Rc::new(Lambertian::from_color(Color::new(0.73, 0.73, 0.73)));
+    let ns = 1000;
+    for _ in 0..ns {
+        boxes2.add(Rc::new(Sphere::new(
+            Point::random() * 100.0,
+            10.0,
+            white.clone()
+        )));
+    }
+
+    world.add(Rc::new(Translate::new(
+        Rc::new(RotateY::new(
+            Rc::new(BVHNode::from_hittable_list(&mut boxes2)),
+            15f64.to_radians()
+        )),
+        Vector::new(-100.0, 270.0, 395.0)
+    )));
+    camera.render(&world)
+}
+
 fn main() {
-    cornell_smokes();
+    tnw();
 }
