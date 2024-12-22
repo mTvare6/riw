@@ -22,6 +22,8 @@ type Vector = DVec3;
 type UV = DVec2;
 type Float = f64;
 
+const BLUE: Color = Color{x:0.7, y:0.8, z:1.0};
+
 #[repr(C)]
 pub struct ConfigValue {
     marker: [u8; 8],
@@ -731,23 +733,14 @@ impl Camera{
         let p = Point::random_on_disk();
         self.center + p.x * self.defocus_disk_u + p.y * self.defocus_disk_v
     }
-    fn new() -> Self {
-        //let background = Color::new(0.70, 0.80, 1.00);
-        let background = Color::ZERO;
+    fn new(lookfrom: Point, lookat: Point, vup:Vector, background:Color, vfov:Float, defocus_angle:Float, aspect_ratio:Float) -> Self {
         let image_width = unsafe { CONFIGS[0].value } as usize;
-        let aspect_ratio = unsafe { CONFIGS[1].value };
         let image_height = ((image_width as Float)/aspect_ratio) as usize;
         let pixel_density = unsafe { CONFIGS[2].value } as usize;
         let inverse_density = (pixel_density as Float).recip();
         let max_depth = unsafe { CONFIGS[3].value } as usize;
-        let lookfrom = Point::new(478., 278., -600.);
-        let lookat = Point::new(278., 278., 0.);
-        let vup = Point::Y;
-
-        let defocus_angle = 0f64;
         //let focus_dist = 10.0;
         let focus_dist = (lookfrom-lookat).length();
-        let vfov = 40f64;
         let w = (lookfrom-lookat).normalize();
         let u = vup.cross(w).normalize();
         let v = w.cross(u);
@@ -1038,7 +1031,8 @@ impl Perlin{
     }
 }
 
-fn cube(a: Point, b: Point, mat: Rc<dyn Material>) -> Rc<HittableList> {
+
+fn make_bounding_cube(a: Point, b: Point, mat: Rc<dyn Material>) -> Rc<HittableList> {
 
     let mut sides:HittableList  = HittableList::new();
     
@@ -1057,47 +1051,12 @@ fn cube(a: Point, b: Point, mat: Rc<dyn Material>) -> Rc<HittableList> {
     let dy = Vector::new(0.0, max.y - min.y, 0.0);
     let dz = Vector::new(0.0, 0.0, max.z - min.z);
 
-    sides.add(Rc::new(Quad::new( // front
-        Point::new(min.x, min.y, max.z),
-        dx,
-        dy,
-        mat.clone()
-    )));
-    
-    sides.add(Rc::new(Quad::new( // right
-        Point::new(max.x, min.y, max.z),
-        -dz,
-        dy,
-        mat.clone()
-    )));
-    
-    sides.add(Rc::new(Quad::new( // back
-        Point::new(max.x, min.y, min.z),
-        -dx,
-        dy,
-        mat.clone()
-    )));
-    
-    sides.add(Rc::new(Quad::new( // left
-        Point::new(min.x, min.y, min.z),
-        dz,
-        dy,
-        mat.clone()
-    )));
-    
-    sides.add(Rc::new(Quad::new( // top
-        Point::new(min.x, max.y, max.z),
-        dx,
-        -dz,
-        mat.clone()
-    )));
-    
-    sides.add(Rc::new(Quad::new( // bottom
-        Point::new(min.x, min.y, min.z),
-        dx,
-        dz,
-        mat
-    )));
+    sides.add(Rc::new(Quad::new(Point::new(min.x, min.y, max.z), dx, dy, mat.clone()))); // front
+    sides.add(Rc::new(Quad::new(Point::new(max.x, min.y, max.z), -dz, dy, mat.clone()))); // right
+    sides.add(Rc::new(Quad::new(Point::new(max.x, min.y, min.z), -dx, dy, mat.clone()))); // back
+    sides.add(Rc::new(Quad::new(Point::new(min.x, min.y, min.z), dz, dy, mat.clone()))); // left
+    sides.add(Rc::new(Quad::new(Point::new(min.x, max.y, max.z), dx, -dz, mat.clone()))); // top
+    sides.add(Rc::new(Quad::new(Point::new(min.x, min.y, min.z), dx, dz, mat)));  // bottom
 
     Rc::new(sides)
 }
@@ -1106,7 +1065,7 @@ fn cube(a: Point, b: Point, mat: Rc<dyn Material>) -> Rc<HittableList> {
 
 fn classic() {
     let mut world:HittableList  = HittableList::new();
-    let camera: Camera = Camera::new();
+    let camera: Camera = Camera::new(Vector::new(13., 2., 3.), Vector::ZERO, Vector::Y, BLUE, 40., 0., 16./9.0);
 
     let refractive_index = rand();
 
@@ -1153,7 +1112,7 @@ fn classic() {
 
 fn two_balls(){
     let mut world:HittableList  = HittableList::new();
-    let camera: Camera = Camera::new();
+    let camera: Camera = Camera::new(Vector::new(13., 2., 3.), Vector::ZERO, Vector::Y, BLUE, 40., 0., 16./9.0);
 
     let tex = Rc::new(CheckeredColor::from_color(0.05, Color::new(0.15, 0.15, 0.15), Color::new(0.9, 0.9, 0.9)));
     let material_ground = Rc::new(Lambertian{tex});
@@ -1165,7 +1124,7 @@ fn two_balls(){
 
 fn marbles(){
     let mut world:HittableList  = HittableList::new();
-    let camera: Camera = Camera::new();
+    let camera: Camera = Camera::new(Vector::new(13., 2., 3.), Vector::ZERO, Vector::Y, BLUE, 40., 0., 16./9.0);
 
     let tex = Rc::new(NoiseTexture::new(16.0));
     let mat = Rc::new(Lambertian{tex});
@@ -1177,7 +1136,7 @@ fn marbles(){
 
 fn marble_sunset_plains(){
     let mut world:HittableList  = HittableList::new();
-    let camera: Camera = Camera::new();
+    let camera: Camera = Camera::new(Vector::new(13., 2., 3.), Vector::ZERO, Vector::Y, Color::ZERO, 40., 0., 16./9.0);
 
     let tex = Rc::new(NoiseTexture::new(16.0));
     let mat = Rc::new(Lambertian{tex});
@@ -1196,154 +1155,9 @@ fn marble_sunset_plains(){
     camera.render(&world);
 }
 
-fn cornell(){
-    let mut world:HittableList  = HittableList::new();
-    let camera: Camera = Camera::new();
-    let red = Rc::new(Lambertian::from_color(Color::new(0.65, 0.05, 0.05)));
-    let white = Rc::new(Lambertian::from_color(Color::new(0.73, 0.73, 0.73)));
-    let green = Rc::new(Lambertian::from_color(Color::new(0.12, 0.45, 0.15)));
-    let light = Rc::new(DiffuseLight::from_color(Color::new(15.0, 15.0, 15.0)));
-
-    world.add(Rc::new(Quad::new(
-        Point::new(555.0, 0.0, 0.0),
-        Vector::new(0.0, 555.0, 0.0),
-        Vector::new(0.0, 0.0, 555.0),
-        green
-    )));
-
-    world.add(Rc::new(Quad::new(
-        Point::new(0.0, 0.0, 0.0),
-        Vector::new(0.0, 555.0, 0.0),
-        Vector::new(0.0, 0.0, 555.0),
-        red
-    )));
-
-    world.add(Rc::new(Quad::new(
-        Point::new(343.0, 554.0, 332.0),
-        Vector::new(-130.0, 0.0, 0.0),
-        Vector::new(0.0, 0.0, -105.0),
-        light
-    )));
-
-    world.add(Rc::new(Quad::new(
-        Point::new(0.0, 0.0, 0.0),
-        Vector::new(555.0, 0.0, 0.0),
-        Vector::new(0.0, 0.0, 555.0),
-        white.clone()
-    )));
-
-    world.add(Rc::new(Quad::new(
-        Point::new(555.0, 555.0, 555.0),
-        Vector::new(-555.0, 0.0, 0.0),
-        Vector::new(0.0, 0.0, -555.0),
-        white.clone()
-    )));
-
-    world.add(Rc::new(Quad::new(
-        Point::new(0.0, 0.0, 555.0),
-        Vector::new(555.0, 0.0, 0.0),
-        Vector::new(0.0, 555.0, 0.0),
-        white.clone()
-    )));
-    let box1 = cube(Point::ZERO, Point::new(165., 330., 165.), white.clone());
-    let box1 = Rc::new(RotateY::new(box1, 15f64.to_radians()));
-    let box1 = Rc::new(Translate::new(box1, Vector::new(265., 0., 295.)));
-
-    let box2 = cube(Point::ZERO, Point::new(165., 165., 165.), white.clone());
-    let box2 = Rc::new(RotateY::new(box2, -18f64.to_radians()));
-    let box2 = Rc::new(Translate::new(box2, Vector::new(130., 0., 65.)));
-
-    world.add(box1);
-    world.add(box2);
-
-    let bvh = Rc::new(BVHNode::from_hittable_list(&mut world));
-    let world = HittableList {
-        objects: vec![bvh.clone()],
-        bbox: bvh.bounding_box().clone()
-    };
-    camera.render(&world);
-}
-fn cornell_smokes(){
-    let mut world:HittableList  = HittableList::new();
-    let camera: Camera = Camera::new();
-    let red = Rc::new(Lambertian::from_color(Color::new(0.65, 0.05, 0.05)));
-    let white = Rc::new(Lambertian::from_color(Color::new(0.73, 0.73, 0.73)));
-    let green = Rc::new(Lambertian::from_color(Color::new(0.12, 0.45, 0.15)));
-    let light = Rc::new(DiffuseLight::from_color(Color::new(7.0, 7.0, 7.0)));
-
-    world.add(Rc::new(Quad::new(
-        Point::new(555.0, 0.0, 0.0),
-        Vector::new(0.0, 555.0, 0.0),
-        Vector::new(0.0, 0.0, 555.0),
-        green
-    )));
-
-    world.add(Rc::new(Quad::new(
-        Point::ZERO,
-        Vector::new(0.0, 555.0, 0.0),
-        Vector::new(0.0, 0.0, 555.0),
-        red
-    )));
-
-    world.add(Rc::new(Quad::new(
-        Point::new(113.0, 554.0, 127.0),
-        Vector::new(330.0, 0.0, 0.0),
-        Vector::new(0.0, 0.0, 305.0),
-        light
-    )));
-
-    world.add(Rc::new(Quad::new(
-        Point::new(0.0, 555.0, 0.0),
-        Vector::new(555.0, 0.0, 0.0),
-        Vector::new(0.0, 0.0, 555.0),
-        white.clone()
-    )));
-
-    world.add(Rc::new(Quad::new(
-        Point::ZERO,
-        Vector::new(555.0, 0.0, 0.0),
-        Vector::new(0.0, 0.0, 555.0),
-        white.clone()
-    )));
-
-    world.add(Rc::new(Quad::new(
-        Point::new(0.0, 0.0, 555.0),
-        Vector::new(555.0, 0.0, 0.0),
-        Vector::new(0.0, 555.0, 0.0),
-        white.clone()
-    )));
-
-    let box1 = cube(
-        Point::ZERO,
-        Point::new(165.0, 330.0, 165.0),
-        white.clone()
-    );
-    let box1 = Rc::new(RotateY::new(box1, 15f64.to_radians()));
-    let box1 = Rc::new(Translate::new(box1, Vector::new(265.0, 0.0, 295.0)));
-
-    let box2 = cube(
-        Point::ZERO,
-        Point::new(165.0, 165.0, 165.0),
-        white.clone()
-    );
-    let box2 = Rc::new(RotateY::new(box2, -18f64.to_radians()));
-    let box2 = Rc::new(Translate::new(box2, Vector::new(130.0, 0.0, 65.0)));
-
-    world.add(Rc::new(ConstantMedium::from_color(box1, 0.001, Color::ZERO)));
-    world.add(Rc::new(ConstantMedium::from_color(box2, 0.01, Color::ONE)));
-
-    let bvh = Rc::new(BVHNode::from_hittable_list(&mut world));
-    let world = HittableList {
-        objects: vec![bvh.clone()],
-        bbox: bvh.bounding_box().clone()
-    };
-
-    camera.render(&world);
-}
-
 fn tnw() {
-    let camera = Camera::new();
     let mut boxes1 = HittableList::new();
+    let camera: Camera = Camera::new(Vector::new(278., 278., -800.), Vector::new(278., 278., 0.), Vector::Y, Color::ZERO, 40., 0., 1.);
     let ground = Rc::new(Lambertian::from_color(Color::new(0.48, 0.83, 0.53)));
 
     let boxes_per_side = 20;
@@ -1356,7 +1170,7 @@ fn tnw() {
             let x1 = x0 + w;
             let y1 = 1.0 + rand() * 100.0;
             let z1 = z0 + w;
-            boxes1.add(cube(
+            boxes1.add(make_bounding_cube(
                 Point::new(x0, y0, z0),
                 Point::new(x1, y1, z1),
                 ground.clone()
@@ -1451,9 +1265,155 @@ fn tnw() {
         )),
         Vector::new(-100.0, 270.0, 395.0)
     )));
-    camera.render(&world)
+    camera.render(&world);
+}
+
+fn cornell_smokes(){
+    let mut world:HittableList  = HittableList::new();
+    let camera: Camera = Camera::new(Vector::new(278., 278., -800.), Vector::new(278., 278., 0.), Vector::Y, Color::ZERO, 40., 0., 1.);
+    let red = Rc::new(Lambertian::from_color(Color::new(0.65, 0.05, 0.05)));
+    let white = Rc::new(Lambertian::from_color(Color::new(0.73, 0.73, 0.73)));
+    let green = Rc::new(Lambertian::from_color(Color::new(0.12, 0.45, 0.15)));
+    let light = Rc::new(DiffuseLight::from_color(Color::new(7.0, 7.0, 7.0)));
+
+    world.add(Rc::new(Quad::new(
+        Point::new(555.0, 0.0, 0.0),
+        Vector::new(0.0, 555.0, 0.0),
+        Vector::new(0.0, 0.0, 555.0),
+        green
+    )));
+
+    world.add(Rc::new(Quad::new(
+        Point::ZERO,
+        Vector::new(0.0, 555.0, 0.0),
+        Vector::new(0.0, 0.0, 555.0),
+        red
+    )));
+
+    world.add(Rc::new(Quad::new(
+        Point::new(113.0, 554.0, 127.0),
+        Vector::new(330.0, 0.0, 0.0),
+        Vector::new(0.0, 0.0, 305.0),
+        light
+    )));
+
+    world.add(Rc::new(Quad::new(
+        Point::new(0.0, 555.0, 0.0),
+        Vector::new(555.0, 0.0, 0.0),
+        Vector::new(0.0, 0.0, 555.0),
+        white.clone()
+    )));
+
+    world.add(Rc::new(Quad::new(
+        Point::ZERO,
+        Vector::new(555.0, 0.0, 0.0),
+        Vector::new(0.0, 0.0, 555.0),
+        white.clone()
+    )));
+
+    world.add(Rc::new(Quad::new(
+        Point::new(0.0, 0.0, 555.0),
+        Vector::new(555.0, 0.0, 0.0),
+        Vector::new(0.0, 555.0, 0.0),
+        white.clone()
+    )));
+
+    let box1 = make_bounding_cube(
+        Point::ZERO,
+        Point::new(165.0, 330.0, 165.0),
+        white.clone()
+    );
+    let box1 = Rc::new(RotateY::new(box1, 15f64.to_radians()));
+    let box1 = Rc::new(Translate::new(box1, Vector::new(265.0, 0.0, 295.0)));
+
+    let box2 = make_bounding_cube(
+        Point::ZERO,
+        Point::new(165.0, 165.0, 165.0),
+        white.clone()
+    );
+    let box2 = Rc::new(RotateY::new(box2, -18f64.to_radians()));
+    let box2 = Rc::new(Translate::new(box2, Vector::new(130.0, 0.0, 65.0)));
+
+    world.add(Rc::new(ConstantMedium::from_color(box1, 0.001, Color::ZERO)));
+    world.add(Rc::new(ConstantMedium::from_color(box2, 0.01, Color::ONE)));
+
+    let bvh = Rc::new(BVHNode::from_hittable_list(&mut world));
+    let world = HittableList {
+        objects: vec![bvh.clone()],
+        bbox: bvh.bounding_box().clone()
+    };
+
+    camera.render(&world);
+}
+
+fn cornell() {
+    let mut world = HittableList::new();
+    let camera=Camera::new(Vector::new(278.0,278.0,-800.0),Vector::new(278.0,278.0,0.0),Vector::Y,Color::ZERO,40.0,0.0,1.0);
+    
+    let red = Rc::new(Lambertian::from_color(Color::new(0.65, 0.05, 0.05)));
+    let white = Rc::new(Lambertian::from_color(Color::new(0.73, 0.73, 0.73)));
+    let green = Rc::new(Lambertian::from_color(Color::new(0.12, 0.45, 0.15)));
+    let light = Rc::new(DiffuseLight::from_color(Color::new(15.0, 15.0, 15.0)));
+
+    world.add(Rc::new(Quad::new(
+        Point::new(555.0, 0.0, 0.0),
+        Vector::new(0.0, 0.0, 555.0),
+        Vector::new(0.0, 555.0, 0.0),
+        green
+    )));
+    world.add(Rc::new(Quad::new(
+        Point::new(0.0, 0.0, 555.0),
+        Vector::new(0.0, 0.0, -555.0),
+        Vector::new(0.0, 555.0, 0.0),
+        red
+    )));
+    world.add(Rc::new(Quad::new(
+        Point::new(0.0, 555.0, 0.0),
+        Vector::new(555.0, 0.0, 0.0),
+        Vector::new(0.0, 0.0, 555.0),
+        white.clone()
+    )));
+    world.add(Rc::new(Quad::new(
+        Point::new(0.0, 0.0, 555.0),
+        Vector::new(555.0, 0.0, 0.0),
+        Vector::new(0.0, 0.0, -555.0),
+        white.clone()
+    )));
+    world.add(Rc::new(Quad::new(
+        Point::new(555.0, 0.0, 555.0),
+        Vector::new(-555.0, 0.0, 0.0),
+        Vector::new(0.0, 555.0, 0.0),
+        white.clone()
+    )));
+let lights = Quad::new(
+        Point::new(213.0, 554.0, 227.0),
+        Vector::new(130.0, 0.0, 0.0),
+        Vector::new(0.0, 0.0, 105.0),
+        light.clone()
+    );
+
+    world.add(Rc::new(lights));
+
+    let box1 = make_bounding_cube( Point::ZERO, Point::new(165.0, 330.0, 165.0), white.clone());
+    let box1 = Rc::new(RotateY::new(box1, 15f64.to_radians()));
+    let box1 = Rc::new(Translate::new(box1, Vector::new(265.0, 0.0, 295.0)));
+    world.add(box1);
+
+    let box2 = make_bounding_cube( Point::ZERO, Point::new(165.0, 165.0, 165.0), white.clone());
+    let box2 = Rc::new(RotateY::new(box2, -18f64.to_radians()));
+    let box2 = Rc::new(Translate::new(box2, Vector::new(130.0, 0.0, 65.0)));
+    world.add(box2);
+
+    let bvh = Rc::new(BVHNode::from_hittable_list(&mut world));
+    let world = HittableList {
+        objects: vec![bvh.clone()],
+        bbox: bvh.bounding_box().clone()
+    };
+    camera.render(&world);
 }
 
 fn main() {
-    tnw();
+    cornell();
 }
+
+

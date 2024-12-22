@@ -33,3 +33,9 @@ feh image.ppm
 ```
 
 
+# Todo
+- [ ] Use static dispatch using enum_dispatch
+- [ ] Tone mapping LUT
+- [ ] obj loading, scene from files
+- [ ] half quads
+- [ ] use PDFs properly
