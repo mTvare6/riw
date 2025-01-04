@@ -26,6 +26,7 @@ pub fn make_bounding_cube(a: Point, b: Point, mat: Rc<dyn Material>) -> Rc<Hitta
 }
 
 
+#[derive(Clone)]
 pub struct Quad{
     q: Point,
     u: Point,
@@ -33,6 +34,7 @@ pub struct Quad{
     n: Vector,
     w: Vector,
     d: Float,
+    area: Float,
     mat: Rc<dyn Material>,
     bbox: AABB,
 }
@@ -46,7 +48,8 @@ impl Quad{
         let w = normal/normal.length_squared();
         let n = normal.normalize();
         let d = n.dot(q);
-        Self{q, u, v, mat, bbox, n, d, w}
+        let area = normal.length();
+        Self{q, u, v, mat, bbox, n, d, w, area}
     }
     fn is_interior(a: Float, b: Float) -> Option<UV> {
         const UNIT: Interval = Interval{min:0.0, max:1.0};
@@ -79,6 +82,17 @@ impl Hittable for Quad{
     }
     fn bounding_box(&self) -> &AABB {
         &self.bbox
+    }
+    fn pdf(&self, orig: &Point, dir: &Vector) -> Float {
+        self.hit(&Ray{orig:*orig, dir:*dir}, &Interval::IN_SCENE).map_or(0.0, |record| {
+            let dist_square = record.t * record.t * dir.length_squared();
+            let cos = dir.dot(record.n).abs() / dir.length();
+            dist_square / (cos*self.area)
+        })
+    }
+    fn dir_to_random_point_to_hit(&self, orig: &Point) -> Vector {
+        let p = self.q + (self.u*rand()) + (self.v*rand());
+        p-orig
     }
 }
 

@@ -52,5 +52,14 @@ impl Hittable for HittableList{
     fn bounding_box(&self) -> &AABB {
         &self.bbox
     }
-
+    fn dir_to_random_point_to_hit(&self, orig: &Point) -> Vector {
+        RNG.with(|rng|{
+            let mut rng = rng.borrow_mut();
+            self.objects.choose(&mut *rng).unwrap().dir_to_random_point_to_hit(orig)
+        })
+    }
+    fn pdf(&self, orig: &Point, dir: &Vector) -> Float {
+        let w = (self.objects.len() as Float).recip();
+        self.objects.iter().fold(0.0, |acc, object| acc+w*object.pdf(orig, dir))
+    }
 }

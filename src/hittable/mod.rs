@@ -17,5 +17,11 @@ pub use constant_medium::*;
 pub trait Hittable{
     fn hit(&self, ray: &Ray, t:&Interval) -> Option<HitRecord>;
     fn bounding_box(&self) -> &AABB;
+    fn pdf(&self, orig: &Point, dir: &Vector) -> Float{
+        0.0
+    }
+    fn dir_to_random_point_to_hit(&self, orig: &Point) -> Vector{
+        Point::X
+    }
 }
 

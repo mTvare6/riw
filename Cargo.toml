@@ -7,3 +7,14 @@ edition = "2021"
 glam = "*"
 rand = "*"
 rayon = "*"
+
+# [profile.release]
+# lto = "fat"
+# panic = 'abort'
+# opt-level = 3
+# codegen-units = 1
+# incremental = false
+# debug = false
+# overflow-checks = false
+# debug-assertions = false
+#

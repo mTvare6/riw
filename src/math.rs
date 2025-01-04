@@ -18,6 +18,7 @@ impl Add<Float> for &Interval{
 impl Interval{
     pub const NONE: Self = Self{min:INFINITY, max:NEG_INFINITY};
     pub const ALL: Self = Self{min:NEG_INFINITY, max:INFINITY};
+    pub const IN_SCENE : Self = Self{min: 0.001, max: INFINITY};
     pub fn len(&self) -> Float{
         self.max - self.min
     }
@@ -47,12 +48,32 @@ impl Interval{
 
 pub struct Ray{
     pub orig:Point,
-    pub dir:Point,
+    pub dir:Vector,
 }
 
 impl Ray{
     pub fn at(&self, t:Float) -> Point{
         self.orig + t*self.dir
     }
+    pub fn new(orig: Point, dir: Vector) -> Self{
+        Self{orig, dir}
+    }
 }
 
+pub struct ONB{
+    pub u : Vector,
+    pub v : Vector,
+    pub w : Vector,
+}
+impl ONB{
+    pub fn new(n: &Vector) -> Self{
+        let w = n.normalize();
+        let a = if w.x.abs() > 0.9 { Vector::Y } else { Vector::X };
+        let v = w.cross(a).normalize();
+        let u = w.cross(v);
+        Self{u,v,w}
+    }
+    pub fn transform(&self, v: &Vector) -> Vector{
+        self.u * v.x + self.v * v.y + self.w * v.z
+    }
+}

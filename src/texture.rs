@@ -115,16 +115,10 @@ impl Perlin{
         ))).sum::<Float>()
     }
     fn turbulence(&self, p:&Point, depth: usize) -> Float{
-        let mut sum = 0.;
-        let mut temp_p = p.clone();
-        let mut weight = 1.0;
-
-        for i in 0..depth{
-            sum+=weight*self.noise(&temp_p);
-            weight*=0.5;
-            temp_p*=2.;
-        }
-        sum.abs()
+        (0..depth)
+            .fold((0.0, p.clone(), 1.0), |(sum, point, weight), _| {
+                (sum + weight * self.noise(&point), point * 2.0, weight * 0.5)
+            }).0.abs()
     }
 }
 

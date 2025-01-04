@@ -43,7 +43,7 @@ pub fn classic() {
         bbox: bvh.bounding_box().clone()
     };
 
-    camera.render(&world);
+    //camera.render(&world);
 }
 
 pub fn two_balls(){
@@ -55,7 +55,7 @@ pub fn two_balls(){
     world.add(Rc::new(Sphere::new(Point{x:0.0, y:10., z:-1.0}, 10., material_ground.clone())));
     world.add(Rc::new(Sphere::new(Point{x:0.0, y:-10., z:-1.0}, 10., material_ground)));
 
-    camera.render(&world);
+    //camera.render(&world);
 }
 
 pub fn marbles(){
@@ -67,7 +67,7 @@ pub fn marbles(){
     world.add(Rc::new(Sphere::new(Point::new(0., 2.0, 0.), 2., mat.clone())));
     world.add(Rc::new(Sphere::new(Point::new(0., -1000.0, 0.), 1000., mat)));
 
-    camera.render(&world);
+    //camera.render(&world);
 }
 
 pub fn marble_sunset_plains(){
@@ -88,7 +88,7 @@ pub fn marble_sunset_plains(){
     world.add(Rc::new(Sphere::new(Point::new(-30., 40.0, 0.), 20., sun)));
     world.add(Rc::new(Sphere::new(Point::new(0., 2.0, 0.), 2., mat.clone())));
     world.add(Rc::new(Sphere::new(Point::new(0., -1000.0, 0.), 1000., white)));
-    camera.render(&world);
+    //camera.render(&world);
 }
 
 pub fn tnw() {
@@ -201,7 +201,7 @@ pub fn tnw() {
         )),
         Vector::new(-100.0, 270.0, 395.0)
     )));
-    camera.render(&world);
+    //camera.render(&world);
 }
 
 pub fn cornell_smokes(){
@@ -279,11 +279,12 @@ pub fn cornell_smokes(){
         bbox: bvh.bounding_box().clone()
     };
 
-    camera.render(&world);
+    //camera.render(&world);
 }
 
 pub fn cornell() {
     let mut world = HittableList::new();
+    let mut lights = HittableList::new();
     let camera=Camera::new(Vector::new(278.0,278.0,-800.0),Vector::new(278.0,278.0,0.0),Vector::Y,Color::ZERO,40.0,0.0,1.0);
     
     let red = Rc::new(Lambertian::from_color(Color::new(0.65, 0.05, 0.05)));
@@ -321,7 +322,95 @@ pub fn cornell() {
         Vector::new(0.0, 555.0, 0.0),
         white.clone()
     )));
-let lights = Quad::new(
+    let light_pane = Rc::new(Quad::new(
+        Point::new(213.0, 554.0, 227.0),
+        Vector::new(130.0, 0.0, 0.0),
+        Vector::new(0.0, 0.0, 105.0),
+        light.clone()
+    ));
+    world.add(light_pane);
+
+    let glass = Rc::new(Dielectric::new(1.5));
+    let box1 = make_bounding_cube( Point::ZERO, Point::new(165.0, 330.0, 165.0), white.clone());
+    let box1 = Rc::new(RotateY::new(box1, 15f64.to_radians()));
+    let box1 = Rc::new(Translate::new(box1, Vector::new(265.0, 0.0, 295.0)));
+    world.add(box1);
+
+    world.add(Rc::new(Sphere::new(Point::new(190., 90., 190.), 90., glass)));
+
+
+    let null_mat = Rc::new(EmptyMaterial{});
+    let light_shell = Rc::new(Quad::new(
+        Point::new(213.0, 554.0, 227.0),
+        Vector::new(130.0, 0.0, 0.0),
+        Vector::new(0.0, 0.0, 105.0),
+        null_mat.clone()
+    ));
+    lights.add(light_shell);
+    lights.add(Rc::new(Sphere::new(Point::new(190., 90., 190.), 90., null_mat)));
+
+    //let box2 = make_bounding_cube( Point::ZERO, Point::new(165.0, 165.0, 165.0), white.clone());
+    //let box2 = Rc::new(RotateY::new(box2, -18f64.to_radians()));
+    //let box2 = Rc::new(Translate::new(box2, Vector::new(130.0, 0.0, 65.0)));
+    //world.add(box2);
+    camera.render(&world, &lights);
+}
+
+pub fn mirror_magic() {
+    let mut world = HittableList::new();
+    let w = 555.;
+    let camera=Camera::new(Vector::new(w*0.9,w*0.5,0.0), Vector::new(0.0,w*0.5,w),Vector::Y,Color::ZERO,90.0,0.0,1.0);
+
+    let red = Rc::new(Metal::new(Color::new(0.65, 0.05, 0.05), 0.0));
+    let white_fb = Rc::new(Metal::new(Color::new(0.73, 0.73, 0.73), 0.0));
+    let white = Rc::new(Lambertian::from_color(Color::new(0.73, 0.73, 0.73)));
+    let ball = Rc::new(Lambertian::from_color(Color::new(0.73, 0.73, 0.73)));
+    let green = Rc::new(Metal::new(Color::new(0.12, 0.45, 0.15), 0.0));
+    let light = Rc::new(DiffuseLight::from_color(Color::new(15.0, 15.0, 15.0)));
+
+    world.add(Rc::new(Quad::new(
+        Point::new(w, 0.0, 0.0),
+        Vector::new(0.0, 0.0, w),
+        Vector::new(0.0, w, 0.0),
+        green
+    )));
+    world.add(Rc::new(Quad::new(
+        Point::new(0.0, 0.0, w),
+        Vector::new(0.0, 0.0, -w),
+        Vector::new(0.0, w, 0.0),
+        red
+    )));
+    world.add(Rc::new(Quad::new(
+        Point::new(0.0, w, 0.0),
+        Vector::new(w, 0.0, 0.0),
+        Vector::new(0.0, 0.0, w),
+        white.clone()
+    )));
+    world.add(Rc::new(Quad::new(
+        Point::new(0.0, 0.0, w),
+        Vector::new(w, 0.0, 0.0),
+        Vector::new(0.0, 0.0, -w),
+        white.clone()
+    )));
+    world.add(Rc::new(Quad::new(
+        Point::new(w, 0.0, w),
+        Vector::new(-w, 0.0, 0.0),
+        Vector::new(0.0, w, 0.0),
+        white.clone()
+    )));
+    world.add(Rc::new(Quad::new(
+        Point::new(w, 0.0, w),
+        Vector::new(-w, 0.0, 0.0),
+        Vector::new(0.0, w, 0.0),
+        white_fb.clone()
+    )));
+    world.add(Rc::new(Quad::new(
+        Point::new(w, 0.0, 0.0),
+        Vector::new(-w, 0.0, 0.0),
+        Vector::new(0.0, w, 0.0),
+        white_fb.clone()
+    )));
+    let lights = Quad::new(
         Point::new(213.0, 554.0, 227.0),
         Vector::new(130.0, 0.0, 0.0),
         Vector::new(0.0, 0.0, 105.0),
@@ -330,20 +419,13 @@ let lights = Quad::new(
 
     world.add(Rc::new(lights));
 
-    let box1 = make_bounding_cube( Point::ZERO, Point::new(165.0, 330.0, 165.0), white.clone());
-    let box1 = Rc::new(RotateY::new(box1, 15f64.to_radians()));
-    let box1 = Rc::new(Translate::new(box1, Vector::new(265.0, 0.0, 295.0)));
-    world.add(box1);
-
-    let box2 = make_bounding_cube( Point::ZERO, Point::new(165.0, 165.0, 165.0), white.clone());
-    let box2 = Rc::new(RotateY::new(box2, -18f64.to_radians()));
-    let box2 = Rc::new(Translate::new(box2, Vector::new(130.0, 0.0, 65.0)));
-    world.add(box2);
+    let c = Rc::new(Sphere::new(Point::new(190.0, 180.0, 395.0), 140.0, white.clone()));
+    world.add(c);
 
     let bvh = Rc::new(BVHNode::from_hittable_list(&mut world));
     let world = HittableList {
         objects: vec![bvh.clone()],
         bbox: bvh.bounding_box().clone()
     };
-    camera.render(&world);
+    //camera.render(&world);
 }

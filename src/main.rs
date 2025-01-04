@@ -3,7 +3,7 @@
 use glam::{DVec3,DVec2};
 use std::rc::Rc;
 use std::f64::{INFINITY,NEG_INFINITY};
-use std::f64::consts::PI;
+use std::f64::consts::{PI, FRAC_1_PI};
 use rand::prelude::*;
 use rand::distributions::Uniform;
 use std::cell::RefCell;
@@ -19,6 +19,7 @@ mod bvh;
 mod scene;
 mod hittable;
 mod hitrecord;
+mod pdf;
 
 use camera::*;
 use math::*;
@@ -29,6 +30,7 @@ use bvh::*;
 use scene::*;
 use hittable::*;
 use hitrecord::*;
+use pdf::*;
 
 struct UnsafeSync<T>(T);
 unsafe impl<T> Sync for UnsafeSync<T> {}
@@ -83,15 +85,37 @@ fn rand() -> Float{
     })
 }
 
+thread_local! {
+    static RNG: RefCell<ThreadRng> = RefCell::new(thread_rng());
+}
+
+fn randrange<T:rand::distributions::uniform::SampleUniform,>(start: T, end: T) -> T{
+    RNG.with(|rng| {
+        let mut rng = rng.borrow_mut();
+        let uniform_dist = Uniform::new(start, end);
+        uniform_dist.sample(&mut *rng)
+    })
+}
+fn rand_index(n: usize) -> usize{
+    RNG.with(|rng| {
+        let mut rng = rng.borrow_mut();
+        let uniform_dist = Uniform::new(0, n);
+        uniform_dist.sample(&mut *rng)
+    })
+}
+
 trait Ext {
     fn write(&self);
 }
 impl Ext for Color {
     fn write(&self) {
         const COLORSPACE:Interval = Interval{min:0.000, max:0.999};
-        let ir = (256. * COLORSPACE.clamp(linear_to_gamma(self.x))) as u8;
-        let ig = (256. * COLORSPACE.clamp(linear_to_gamma(self.y))) as u8;
-        let ib = (256. * COLORSPACE.clamp(linear_to_gamma(self.z))) as u8;
+        let r = if self.x.is_nan() {0.0} else {self.x};
+        let g = if self.y.is_nan() {0.0} else {self.y};
+        let b = if self.z.is_nan() {0.0} else {self.z};
+        let ir = (256. * COLORSPACE.clamp(linear_to_gamma(r))) as u8;
+        let ig = (256. * COLORSPACE.clamp(linear_to_gamma(g))) as u8;
+        let ib = (256. * COLORSPACE.clamp(linear_to_gamma(b))) as u8;
         println!("{ir} {ig} {ib}")
     }
 }
@@ -100,10 +124,11 @@ trait Utils {
     fn random_unit_vector()->Self;
     fn random_on_pixel()->Self;
     fn random_on_disk()->Self;
+    fn random_cosine_z() -> Self;
     fn random_on_hemisphere(normal: &Vector)->Self;
     fn random()->Self;
-    fn near_zero(&self) -> bool;
-    fn reflect(&self, n: &Self) -> Self;
+    fn random_to_sphere(radius: Float, distance_squared: Float) -> Self;
+    fn is_near_zero(&self) -> bool;
 }
 
 impl Utils for Vector {
@@ -155,15 +180,33 @@ impl Utils for Vector {
                 }
             })
     }
-    fn near_zero(&self) -> bool{
+    fn random_cosine_z() -> Self {
+        let r1 = rand();
+        let r2 = rand();
+
+        let phi = r1 * 2.0 * PI;
+        let z = (1.-r2).sqrt();
+        let rz = r2.sqrt();
+        let x = phi.cos() * rz;
+        let y = phi.sin() * rz;
+        Self{x, y, z}
+    }
+    fn random_to_sphere(radius: Float, distance_squared: Float) -> Self {
+        let r1 = rand();
+        let r2 = rand();
+
+        let phi = 2.0*PI*r1;
+        let z = 1.0 + r2 * ((1.0 - radius*radius/distance_squared).sqrt() - 1.0);
+        let rz = (1.-z*z).sqrt();
+        let x = phi.cos() * rz;
+        let y = phi.sin() * rz;
+        Self{x, y, z}
+    }
+    fn is_near_zero(&self) -> bool{
         let t = 1e-8;
         (self.x.abs() < t) &&
         (self.y.abs() < t) &&
         (self.z.abs() < t)
-    }
-
-    fn reflect(&self, n: &Self) -> Self{
-        self - 2.0*self.dot(*n)*n
     }
 }
 

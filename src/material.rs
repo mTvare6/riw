@@ -1,16 +1,27 @@
 use crate::*;
-pub struct Lambertian{
-    tex: Rc<dyn Texture>
+
+pub struct ScatterRecord{
+    pub attenuation: Color,
+    pub ray: Result<Ray, Box<dyn PDF>>
 }
 
-impl Lambertian{
-    pub fn from_color(albedo:Color) -> Self{
-        let tex = Rc::new(SolidColor::from_color(albedo));
-        Self{tex}
+pub trait Material{
+    fn scatter(&self, ray: &Ray, record:&HitRecord) -> Option<ScatterRecord>{
+        None
     }
-    pub fn new(tex: Rc<dyn Texture>) -> Self{
-        Self{tex}
+    fn emitted(&self, ray: &Ray, record: &HitRecord, u: UV, p: &Point) -> Color{
+        Color::ZERO
     }
+    fn scattering_pdf(&self, ray: &Ray, scattered: &Ray, record:&HitRecord) -> Float{
+        0.0
+    }
+}
+
+pub struct EmptyMaterial{}
+impl Material for EmptyMaterial{}
+
+pub struct Lambertian{
+    tex: Rc<dyn Texture>
 }
 
 pub struct Metal{
@@ -24,6 +35,20 @@ pub struct Dielectric{
 
 pub struct DiffuseLight{
     tex: Rc<dyn Texture>
+}
+
+pub struct Isotropic{
+    tex: Rc<dyn Texture>
+}
+
+impl Lambertian{
+    pub fn from_color(albedo:Color) -> Self{
+        let tex = Rc::new(SolidColor::from_color(albedo));
+        Self{tex}
+    }
+    pub fn new(tex: Rc<dyn Texture>) -> Self{
+        Self{tex}
+    }
 }
 
 impl Metal{
@@ -45,43 +70,33 @@ impl DiffuseLight{
     }
 }
 
-pub struct Isotropic{
-    tex: Rc<dyn Texture>
-}
-
-pub trait Material{
-    fn scatter(&self, ray: &Ray, record:&HitRecord) -> Option<(Color, Ray)>;
-    fn emitted(&self, u: UV, p: &Point) -> Color{
-        Color::ZERO
-    }
-}
 
 impl Material for Lambertian{
-    fn scatter(&self, ray: &Ray, record:&HitRecord) -> Option<(Color, Ray)>{
-        let scatter_direction = {
-            let dir = record.n + Vector::random_unit_vector();
-            if dir.near_zero() { record.n } else { dir }
-        };
-        let scattered = Ray{orig:record.p, dir:scatter_direction};
+    fn scatter(&self, ray: &Ray, record:&HitRecord) -> Option<ScatterRecord>{
         let attenuation = self.tex.texture(record.uv, &record.p);
-        Some((attenuation, scattered))
+        let ray = Err(Box::new(CosinePDF::new(&record.n)) as Box<dyn PDF>);
+        Some(ScatterRecord{attenuation, ray})
+    }
+    fn scattering_pdf(&self, ray: &Ray, scattered: &Ray, record:&HitRecord) -> Float {
+        let cos = record.n.dot(scattered.dir.normalize());
+        0f64.max(cos*FRAC_1_PI)
     }
 }
 
 impl Material for Metal{
-    fn scatter(&self, ray: &Ray, record:&HitRecord) -> Option<(Color, Ray)>{
+    fn scatter(&self, ray: &Ray, record:&HitRecord) -> Option<ScatterRecord>{
         let reflected = {
-            let dir:Vector = ray.dir.reflect(record.n);
+            let dir = ray.dir.reflect(record.n);
             dir.normalize() + (self.fuzz * Vector::random_unit_vector())
         };
-        let scattered = Ray{orig:record.p, dir:reflected};
+        let ray = Ok(Ray{orig:record.p, dir:reflected});
         let attenuation = self.albedo;
-        Some((attenuation, scattered))
+        Some(ScatterRecord{attenuation, ray})
     }
 }
 
 impl Material for Dielectric{
-    fn scatter(&self, ray: &Ray, record:&HitRecord) -> Option<(Color, Ray)>{
+    fn scatter(&self, ray: &Ray, record:&HitRecord) -> Option<ScatterRecord>{
         let ri = if record.front {self.refractive_index.recip()} else {self.refractive_index};
         let unit = ray.dir.normalize();
         let cos = record.n.dot(-unit).min(1.0);
@@ -91,26 +106,30 @@ impl Material for Dielectric{
         } else{
             unit.refract(record.n, ri)
         };
-        let scattered = Ray{orig:record.p, dir};
+        let ray = Ok(Ray{orig:record.p, dir});
         let attenuation = Color::ONE;
-        Some((attenuation, scattered))
+        Some(ScatterRecord{attenuation, ray})
     }
 }
 
 impl Material for DiffuseLight{
-    fn scatter(&self, ray: &Ray, record:&HitRecord) -> Option<(Color, Ray)> {
-        None
-    }
-    fn emitted(&self, uv: UV, p: &Point) -> Color {
-        self.tex.texture(uv, p)
+    fn emitted(&self, ray: &Ray, record:&HitRecord, uv: UV, p: &Point) -> Color {
+        if record.front{
+            self.tex.texture(uv, p)
+        } else {
+            Color::ZERO
+        }
     }
 }
 
 impl Material for Isotropic{
-    fn scatter(&self, ray: &Ray, record:&HitRecord) -> Option<(Color, Ray)> {
-        let scattered = Ray{orig:record.p, dir:Vector::random_unit_vector()};
+    fn scatter(&self, ray: &Ray, record:&HitRecord) -> Option<ScatterRecord>{
         let attenuation = self.tex.texture(record.uv, &record.p);
-        Some((attenuation, scattered))
+        let ray = Err(Box::new(SpherePDF::new()) as Box<dyn PDF>);
+        Some(ScatterRecord{attenuation, ray})
+    }
+    fn scattering_pdf(&self, ray: &Ray, scattered: &Ray, record:&HitRecord) -> Float {
+        FRAC_1_PI*0.25
     }
 }
 

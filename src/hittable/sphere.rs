@@ -1,4 +1,6 @@
 use crate::*;
+
+#[derive(Clone)]
 pub struct Sphere{
     center: Point,
     radius: Float,
@@ -33,6 +35,21 @@ impl Hittable for Sphere{
     }
     fn bounding_box(&self) -> &AABB {
         &self.bbox
+    }
+
+    fn pdf(&self, orig: &Point, dir: &Vector) -> Float {
+        self.hit(&Ray{orig:*orig, dir:*dir}, &Interval::IN_SCENE).map_or(0f64, |record| {
+            let dist_square = (self.center - orig).length_squared();
+            let cos_max = (1.0-self.radius*self.radius/dist_square).sqrt();
+            let solid_angle = 2.0 * PI * (1.0 - cos_max);
+            solid_angle.recip()
+        })
+    }
+    fn dir_to_random_point_to_hit(&self, orig: &Point) -> Vector {
+        let dir = self.center-orig;
+        let dist_square = dir.length_squared();
+        let onb = ONB::new(&dir);
+        onb.transform(&Vector::random_to_sphere(self.radius, dist_square))
     }
 
 }
